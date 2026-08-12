@@ -1,0 +1,26 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "ddalggack-ctf-harness"
+version = "0.1.0"
+description = "Python orchestration harness for parallel CTF-solving agents"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "openai-codex>=0.144.4,<0.145",
+]
+
+[project.optional-dependencies]
+dev = ["build>=1.2", "pytest>=8.0"]
+
+[project.scripts]
+ddalggack = "ctf_harness.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/ctf_harness"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
