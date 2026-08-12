@@ -116,6 +116,9 @@ class CodexDemoCliTests(unittest.TestCase):
             self.assertEqual(captured["token"], "token")
             self.assertEqual(captured["worker_model"], "gpt-5.4")
             self.assertEqual(captured["max_swarms"], 2)
+            self.assertFalse(captured["submit_flags"])
+            self.assertEqual(captured["max_wrong_submissions"], 3)
+            self.assertEqual(captured["heartbeat_interval_s"], 15.0)
             self.assertEqual(payload["run_id"], "event-1")
 
         asyncio.run(scenario())

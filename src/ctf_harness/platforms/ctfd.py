@@ -16,6 +16,10 @@ class CTFdAPIError(RuntimeError):
     """Raised when CTFd returns an HTTP or API-level failure."""
 
 
+class CTFdConnectionError(CTFdAPIError, ConnectionError):
+    """Retryable CTFd transport or temporary server failure."""
+
+
 class CTFdPlatformAdapter:
     """CTFd v1 API adapter using token authentication and challenge file URLs."""
 
@@ -61,9 +65,10 @@ class CTFdPlatformAdapter:
                 raw = response.read()
         except HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")
-            raise CTFdAPIError(f"CTFd {method} {url} failed with HTTP {exc.code}: {detail}") from exc
+            error_type = CTFdConnectionError if exc.code == 429 or exc.code >= 500 else CTFdAPIError
+            raise error_type(f"CTFd {method} {url} failed with HTTP {exc.code}: {detail}") from exc
         except URLError as exc:
-            raise CTFdAPIError(f"CTFd {method} {url} failed: {exc.reason}") from exc
+            raise CTFdConnectionError(f"CTFd {method} {url} failed: {exc.reason}") from exc
         if not expect_json:
             return raw
         try:

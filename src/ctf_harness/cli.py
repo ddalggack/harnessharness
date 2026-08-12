@@ -3,6 +3,7 @@ import asyncio
 import json
 import os
 import tempfile
+import sys
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Callable
@@ -10,12 +11,26 @@ from typing import Any, Callable
 from ctf_harness.app import build_codex_harness
 from ctf_harness.dashboard import serve_dashboard
 from ctf_harness.domain import Challenge
-from ctf_harness.events import EventBus
+from ctf_harness.events import EventBus, ProgressReporter, seek_worker
 from ctf_harness.platforms import CTFdPlatformAdapter, MemoryPlatformAdapter
 from ctf_harness.scheduler import LocalWorkerScheduler
 from ctf_harness.storage import LocalObjectStore, MemoryRunRepository
 from ctf_harness.worker import DemoWorkerRunner
 from ctf_harness.workflows import CtfRunWorkflow
+
+
+def _positive_int(value: str) -> int:
+    parsed = int(value)
+    if parsed < 1:
+        raise argparse.ArgumentTypeError("must be a positive integer")
+    return parsed
+
+
+def _positive_float(value: str) -> float:
+    parsed = float(value)
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("must be positive")
+    return parsed
 
 
 async def _smoke(workers: int) -> int:
@@ -136,6 +151,10 @@ async def _ctfd_run(
     timeout_s: float,
     adapter_factory: Callable[..., Any] = CTFdPlatformAdapter,
     build_harness: Callable[..., Any] = build_codex_harness,
+    submit_flags: bool = False,
+    max_wrong_submissions: int = 3,
+    progress_mode: str = "human",
+    heartbeat_interval_s: float = 15.0,
 ) -> int:
     """Download the current CTFd snapshot and solve it with real Codex workers."""
     platform = adapter_factory(base_url, token=token, timeout_s=timeout_s)
@@ -145,7 +164,16 @@ async def _ctfd_run(
         worker_model=model,
         max_swarms=max_swarms,
         poll_interval_s=5.0,
+        submit_flags=submit_flags,
+        max_wrong_submissions=max_wrong_submissions,
+        heartbeat_interval_s=heartbeat_interval_s,
     )
+    reporter = None
+    if hasattr(harness, "events"):
+        reporter = ProgressReporter(
+            harness.events, runs_root, run_id, console_mode=progress_mode
+        )
+        await reporter.start()
     try:
         result = await harness.workflow.run(run_id)
     except Exception as exc:
@@ -157,6 +185,9 @@ async def _ctfd_run(
             )
         )
         return 1
+    finally:
+        if reporter is not None:
+            await reporter.stop()
     print(json.dumps(_result_payload(result, harness), ensure_ascii=False, indent=2))
     return 0 if result.completed_workers == result.challenge_count else 1
 
@@ -184,6 +215,37 @@ def main() -> int:
     ctfd_run.add_argument("--max-swarms", type=int, choices=range(1, 4), default=3)
     ctfd_run.add_argument("--run-id", default="ctfd-run")
     ctfd_run.add_argument("--timeout", type=float, default=30.0)
+    ctfd_run.add_argument(
+        "--submit-flags",
+        action="store_true",
+        help="submit worker flag candidates to CTFd",
+    )
+    ctfd_run.add_argument(
+        "--max-wrong-submissions",
+        type=_positive_int,
+        default=3,
+        help="stop a worker when this many candidates have been rejected",
+    )
+    ctfd_run.add_argument("--heartbeat-interval", type=_positive_float, default=15.0)
+    progress = ctfd_run.add_mutually_exclusive_group()
+    progress.add_argument(
+        "--progress", dest="progress_mode", action="store_const", const="human"
+    )
+    progress.add_argument(
+        "--progress-json", dest="progress_mode", action="store_const", const="json"
+    )
+    progress.add_argument(
+        "--quiet", dest="progress_mode", action="store_const", const="quiet"
+    )
+    ctfd_run.set_defaults(progress_mode="human")
+
+    seek = commands.add_parser("seek", help="follow detailed activity for one worker")
+    seek.add_argument("target", choices=("worker",))
+    seek.add_argument("worker_number", type=_positive_int)
+    seek.add_argument("--runs-root", type=Path, default=Path("runs"))
+    seek.add_argument("--run-id")
+    seek.add_argument("--no-follow", action="store_true")
+    seek.add_argument("--raw", action="store_true", help="print matching raw JSONL events")
 
     dashboard = commands.add_parser("dashboard", help="serve the local web dashboard")
     dashboard.add_argument("--host", default="127.0.0.1")
@@ -205,11 +267,30 @@ def main() -> int:
                 args.max_swarms,
                 args.run_id,
                 args.timeout,
+                submit_flags=args.submit_flags,
+                max_wrong_submissions=args.max_wrong_submissions,
+                progress_mode=args.progress_mode,
+                heartbeat_interval_s=args.heartbeat_interval,
             )
         )
+    if args.command == "seek":
+        try:
+            return seek_worker(
+                args.runs_root,
+                args.worker_number,
+                run_id=args.run_id,
+                follow=not args.no_follow,
+                raw=args.raw,
+                stream=sys.stdout,
+            )
+        except FileNotFoundError as exc:
+            print(str(exc), file=sys.stderr)
+            return 1
+
     if args.command == "dashboard":
         serve_dashboard(args.host, args.port, args.runs_root)
         return 0
+
     return 2
 
 

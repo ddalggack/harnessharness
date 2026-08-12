@@ -7,6 +7,7 @@ from enum import StrEnum
 
 class ReportKind(StrEnum):
     CHECKPOINT = "checkpoint"
+    FLAG_CANDIDATE = "flag_candidate"
     COMPLETED = "completed"
     FAILED = "failed"
 
@@ -21,6 +22,7 @@ class WorkerAssignment:
     challenge_description: str
     workspace_uri: str
     model: str = "gpt-5.4"
+    worker_number: int = 0
     host: str | None = None
     port: int | None = None
 
