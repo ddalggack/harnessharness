@@ -41,6 +41,25 @@ class HarnessWiringTests(unittest.TestCase):
         self.assertLess(html.index('id="auto-submit-flags"'), html.index('id="connect-button"'))
         self.assertIn("autoSubmitFlags", javascript)
 
+    def test_dashboard_omits_execution_log_panel_and_event_payload(self):
+        from ctf_harness.dashboard import DashboardController
+
+        root = Path(__file__).resolve().parents[1]
+        console = root / "src/ctf_harness/console"
+        html = (console / "index.html").read_text(encoding="utf-8")
+        javascript = (console / "app.js").read_text(encoding="utf-8")
+
+        self.assertNotIn("실행 기록", html)
+        self.assertNotIn('id="event-log"', html)
+        self.assertNotIn("renderEvents", javascript)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            controller = DashboardController(Path(tmp))
+            try:
+                self.assertNotIn("events", controller.public_state())
+            finally:
+                controller.shutdown()
+
     def test_dashboard_only_enables_auto_submit_for_ctfd_runs(self):
         from ctf_harness.dashboard import DashboardController
 
