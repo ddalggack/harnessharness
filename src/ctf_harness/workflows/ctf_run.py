@@ -56,9 +56,10 @@ class CtfRunWorkflow:
         assignment = await self.main.create_assignment(
             run_id, worker_id, challenge, workspace, self.worker_model
         )
+        profile_name = challenge.category or "general"
         profile = WorkerProfile(
-            assignment.profile,
-            f"ddalggack/worker-{assignment.profile}:latest",
+            profile_name,
+            f"ddalggack/worker-{profile_name}:latest",
         )
         await self.main.register(
             WorkerRecord(worker_id, challenge.id, profile, assignment.model)
@@ -72,43 +73,49 @@ class CtfRunWorkflow:
             if not task.done():
                 continue
             try:
-                task.result()
+                final_report = task.result()
             except asyncio.CancelledError:
-                pass
+                await self.main.terminate(worker_id)
             except Exception as exc:
-                record = self.repository.workers[worker_id]
-                await self.main.handle_report(
-                    WorkerReport(
-                        run_id,
-                        worker_id,
-                        record.challenge_id,
-                        ReportKind.FAILED,
-                        f"worker runtime failed: {type(exc).__name__}: {exc}",
-                    )
-                )
-                completed += 1
+                await self._record_runtime_failure(run_id, worker_id, exc)
             else:
-                completed += 1
-            await self.main.terminate(worker_id)
+                if final_report.kind is ReportKind.COMPLETED:
+                    completed += 1
             self.scheduler.remove(worker_id)
         return completed
 
-    async def _cancel_active(self) -> None:
+    async def _record_runtime_failure(
+        self, run_id: str, worker_id: str, exc: BaseException
+    ) -> None:
+        record = self.repository.workers[worker_id]
+        await self.main.handle_report(
+            WorkerReport(
+                run_id,
+                worker_id,
+                record.challenge_id,
+                ReportKind.FAILED,
+                f"worker runtime failed: {type(exc).__name__}: {exc}",
+            )
+        )
+
+    async def _cancel_active(self, run_id: str) -> None:
         tasks = list(self.scheduler.tasks.items())
         for _, task in tasks:
             if not task.done():
                 task.cancel()
         if tasks:
             await asyncio.gather(*(task for _, task in tasks), return_exceptions=True)
-        for worker_id, _ in tasks:
-            await self.main.terminate(worker_id)
+        for worker_id, task in tasks:
+            if task.cancelled():
+                await self.main.terminate(worker_id)
+            elif (exc := task.exception()) is not None:
+                await self._record_runtime_failure(run_id, worker_id, exc)
             self.scheduler.remove(worker_id)
 
     async def run(self, run_id: str) -> CtfRunResult:
         """Process the current unsolved snapshot using an explicit pending queue."""
         poller = PlatformPoller(self.platform, interval_s=self.poll_interval_s)
         completed = 0
-        await self.main.start()
         try:
             await poller.start()
             challenges = [
@@ -137,9 +144,8 @@ class CtfRunWorkflow:
                 run_id, len(challenges), completed, len(self.events.history)
             )
         finally:
-            await self._cancel_active()
+            await self._cancel_active(run_id)
             await poller.stop()
-            await self.main.stop()
 
     async def run_live(self, run_id: str, stop: asyncio.Event) -> CtfRunResult:
         """Continuously consume poll events while keeping at most three active swarms."""
@@ -147,7 +153,6 @@ class CtfRunWorkflow:
         pending: deque[Challenge] = deque()
         accepted_ids: set[str] = set()
         completed = 0
-        await self.main.start()
         try:
             await poller.start()
             for challenge in poller.known_challenges:
@@ -188,13 +193,14 @@ class CtfRunWorkflow:
                         if task is not None:
                             task.cancel()
                             await asyncio.gather(task, return_exceptions=True)
-                            await self.main.terminate(worker_id)
-                            self.scheduler.remove(worker_id)
-                            await self.events.publish(
-                                "swarm.cancelled_external_solve",
-                                worker_id=worker_id,
-                                challenge_id=item.challenge_id,
-                            )
+                            was_cancelled = task.cancelled()
+                            completed += await self._reap_finished(run_id)
+                            if was_cancelled:
+                                await self.events.publish(
+                                    "swarm.cancelled_external_solve",
+                                    worker_id=worker_id,
+                                    challenge_id=item.challenge_id,
+                                )
 
                 completed += await self._reap_finished(run_id)
 
@@ -203,6 +209,5 @@ class CtfRunWorkflow:
                 run_id, len(accepted_ids), completed, len(self.events.history)
             )
         finally:
-            await self._cancel_active()
+            await self._cancel_active(run_id)
             await poller.stop()
-            await self.main.stop()

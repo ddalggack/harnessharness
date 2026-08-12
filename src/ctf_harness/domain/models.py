@@ -1,6 +1,10 @@
 from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import StrEnum
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from ctf_harness.protocol import WorkerReport
 
 class RunStatus(StrEnum):
     CREATED = "created"
@@ -11,7 +15,6 @@ class RunStatus(StrEnum):
 class WorkerStatus(StrEnum):
     CREATED = "created"
     RUNNING = "running"
-    WAITING_FOR_FEEDBACK = "waiting_for_feedback"
     COMPLETED = "completed"
     FAILED = "failed"
     TERMINATED = "terminated"
@@ -38,4 +41,4 @@ class WorkerRecord:
     profile: WorkerProfile
     model: str = "gpt-5.4"
     status: WorkerStatus = WorkerStatus.CREATED
-    reports: list[str] = field(default_factory=list)
+    reports: list[WorkerReport] = field(default_factory=list)

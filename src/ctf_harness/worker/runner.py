@@ -1,9 +1,9 @@
 import asyncio
 from collections.abc import Awaitable, Callable
 from typing import Protocol
-from ctf_harness.protocol import Feedback, ReportKind, WorkerAssignment, WorkerReport
+from ctf_harness.protocol import ReportKind, WorkerAssignment, WorkerReport
 
-ReportCallback = Callable[[WorkerReport], Awaitable[Feedback | None]]
+ReportCallback = Callable[[WorkerReport], Awaitable[None]]
 class WorkerRunner(Protocol):
     async def run(self, assignment: WorkerAssignment, report: ReportCallback) -> WorkerReport: ...
 

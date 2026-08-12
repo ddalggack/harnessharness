@@ -2,18 +2,18 @@
 
 Ddalggack은 여러 CTF 문제를 Codex Agent에게 나누어 맡기고 실행 상태를 관리하는 Python 하네스다.
 
-Coordinator는 대회 전체 흐름을 관리하고, 각 Swarm은 할당된 문제 하나를 독립적으로 풀이한다. Coordinator가 Worker의 명령과 도구 사용을 단계별로 통제하지는 않는다. 최초 작업을 할당하고 Worker가 보내는 checkpoint, blocker, 완료 보고를 바탕으로 상위 수준의 피드백만 제공한다.
+코드 기반 Run Coordinator는 대회 전체 흐름을 관리하고, 각 Swarm은 할당된 문제 하나를 독립적으로 풀이한다. Coordinator는 Worker의 명령, 도구 사용, 풀이 전략을 결정하지 않는다. Challenge 정보를 그대로 WorkerAssignment에 담고 Worker report와 수명주기만 기록한다.
 
-> 현재 버전은 Codex Python SDK 기반 Coordinator와 Worker, 5초 Poller, FIFO pending queue, 최대 3개 Swarm 동시 실행을 구현한다. CTFd 연동과 Docker 격리, 영구 저장소는 아직 구현하지 않았다.
+> 현재 버전은 일반 Python 코드 기반 Coordinator, Codex Python SDK 기반 Worker, 5초 Poller, FIFO pending queue, 최대 3개 Swarm 동시 실행을 구현한다. CTFd 연동과 Docker 격리, 영구 저장소는 아직 구현하지 않았다.
 
 ## 핵심 원칙
 
 - 하나의 Challenge에는 하나의 Swarm을 배정한다.
 - 하나의 Swarm은 하나의 Codex Thread와 하나의 모델만 사용한다.
-- Coordinator는 Codex 모델을 사용하며 Run 전체에서 같은 Thread를 유지한다.
+- Coordinator는 모델을 사용하지 않고 scheduling과 lifecycle을 일반 코드로 처리한다.
 - 동시에 실행하는 Swarm은 최대 3개다.
 - 실행 슬롯이 없으면 Challenge를 FIFO pending queue에 보관한다.
-- Worker는 의미 있는 상태 변화만 Coordinator에 보고한다.
+- Worker는 Challenge 정보를 해석하고 자체 풀이 전략을 세운 뒤 의미 있는 상태 변화만 보고한다.
 - Worker 실행 리소스를 정리해도 report와 workspace는 보존한다.
 - Flag는 Worker가 플랫폼에 직접 제출하지 않고 Submission Broker 경계를 거친다.
 
@@ -29,7 +29,7 @@ Platform Poller (기본 5초)
         └─ challenge_solved
         │
         ▼
-Long-lived Codex Coordinator
+Deterministic Run Coordinator
         │
         ▼
 FIFO Pending Queue
@@ -56,17 +56,18 @@ FIFO Pending Queue
 
 Poller는 모델 선택이나 Worker 생성 정책을 결정하지 않는다. 플랫폼 상태를 내부 이벤트로 바꾸는 역할만 담당한다.
 
-### Codex Coordinator
+### 코드 기반 Run Coordinator
 
-`CodexCoordinatorBackend`는 공식 `openai-codex` Python SDK를 사용한다.
+`MainAgentRuntime`과 `CtfRunWorkflow`가 모델 없이 Run을 조정한다.
 
-- Run 시작 시 `AsyncCodex` client와 Coordinator Thread를 한 번 생성한다.
-- Challenge 정보로 `WorkerAssignment`를 작성한다.
-- Worker report를 읽고 필요한 경우 `Feedback`을 반환한다.
-- 병렬 Worker report가 같은 Thread에 동시에 들어가지 않도록 turn을 직렬화한다.
-- Run이 끝나면 SDK client와 Thread runtime을 정리한다.
+- Challenge 정보를 `WorkerAssignment`에 그대로 복사한다.
+- FIFO pending queue와 활성 Swarm 수를 관리한다.
+- 중복 Worker 생성을 방지한다.
+- Worker report와 상태를 Repository와 EventBus에 기록한다.
+- 외부 solve에 따라 pending Challenge를 제거하거나 활성 Swarm을 취소한다.
+- Run 종료 시 Worker task와 Poller runtime을 정리한다.
 
-Coordinator는 Worker의 shell 명령이나 tool action을 매 단계 승인하지 않는다.
+Coordinator에는 `AsyncCodex` client나 공유 Coordinator Thread가 없다. 따라서 병렬 report를 모델 turn으로 직렬화하거나 Coordinator SDK runtime을 정리할 필요도 없다.
 
 ### Swarm과 Worker
 
@@ -76,14 +77,13 @@ Coordinator는 Worker의 shell 명령이나 tool action을 매 단계 승인하�
 1 Swarm = 1 Challenge = 1 Worker = 1 Model = 1 Codex Thread
 ```
 
-`CodexWorkerRunner`는 할당된 workspace에서 자율적으로 문제를 분석한다. Worker는 다음 report 중 하나를 구조화된 JSON으로 반환한다.
+`CodexWorkerRunner`는 전달받은 Challenge 제목, 카테고리, 설명, 접속 정보와 workspace를 해석한다. Worker가 자체 분석 계획과 풀이 전략을 정한 뒤 다음 report 중 하나를 구조화된 JSON으로 반환한다.
 
 - `checkpoint`: 의미 있는 중간 상태
-- `blocked`: 외부 판단이나 추가 정보가 필요한 상태
 - `completed`: 풀이와 검증을 마친 상태
-- `failed`: 복구할 수 없는 실패 상태
+- `failed`: Worker가 자율적으로 해결할 수 없는 장애를 포함한 종료 실패 상태
 
-`checkpoint`나 `blocked` 보고에 Coordinator feedback이 있으면 같은 Worker Thread의 다음 turn에 전달한다. `completed`나 `failed`가 발생하면 Worker runtime을 정리한다.
+`checkpoint` 이후에는 Worker가 같은 Thread에서 자율적으로 계속한다. 해결 경로가 없으면 `failed`를 반환한다. `completed`나 `failed`가 발생하면 Worker SDK client와 Thread runtime을 정리한다.
 
 ### Pending queue와 동시 실행 제한
 
@@ -107,21 +107,14 @@ CREATED
    ▼
 RUNNING
    │
-   ├───────────────┐
-   ▼               │
-WAITING_FOR_FEEDBACK
-   │               │
-   ▼               │
-FEEDBACK_SENT ─────┘
+   ├─ CHECKPOINT → 같은 Thread에서 계속 실행
    │
-   ▼
-COMPLETED / FAILED
+   ├─ COMPLETED / FAILED → 최종 결과 상태 보존
    │
-   ▼
-TERMINATED
+   └─ 외부 solve 또는 Run 취소 → TERMINATED
 ```
 
-`TERMINATED`는 실행 중인 task와 SDK runtime을 정리했다는 의미다. report, workspace, exploit, writeup 같은 결과물을 삭제했다는 의미는 아니다.
+정상적으로 끝난 Worker는 Scheduler task와 SDK runtime을 정리한 뒤에도 `COMPLETED` 또는 `FAILED` 상태를 유지한다. `TERMINATED`는 외부 solve나 Run 취소로 실행이 중단된 경우에만 사용한다. 인메모리 Repository는 전체 `WorkerReport`를 보존하므로 `kind`, `summary`, `artifacts`, `flag_candidate`를 runtime 정리 후에도 조회할 수 있다.
 
 ## Main–Worker 메시지
 
@@ -135,10 +128,13 @@ TERMINATED
   "run_id": "run-001",
   "worker_id": "run-001-pwn-001",
   "challenge_id": "pwn-001",
-  "objective": "문제를 분석하고 재현 가능한 exploit을 작성한다.",
+  "challenge_title": "baby-bof",
+  "challenge_category": "pwn",
+  "challenge_description": "제공된 ELF의 취약점을 분석하고 flag를 획득한다.",
   "workspace_uri": "runs/run-001/challenges/pwn-001",
-  "profile": "pwn",
-  "model": "gpt-5.4"
+  "model": "gpt-5.4",
+  "host": "ctf.example",
+  "port": 31337
 }
 ```
 
@@ -150,21 +146,10 @@ TERMINATED
   "run_id": "run-001",
   "worker_id": "run-001-pwn-001",
   "challenge_id": "pwn-001",
-  "kind": "blocked",
-  "summary": "제공된 libc와 실행 환경의 libc가 일치하지 않는다.",
+  "kind": "failed",
+  "summary": "제공된 libc와 실행 환경이 일치하지 않고 자율적으로 복구할 경로가 없다.",
   "artifacts": ["probe.py", "notes.md"],
   "flag_candidate": null
-}
-```
-
-### Feedback
-
-```json
-{
-  "type": "Feedback",
-  "run_id": "run-001",
-  "worker_id": "run-001-pwn-001",
-  "directive": "Dockerfile과 실제 프로세스의 loader와 libc를 비교한 뒤 계속한다."
 }
 ```
 
@@ -179,8 +164,7 @@ TERMINATED
 │   ├── domain/                # Challenge와 Worker 상태 모델
 │   ├── events/                # 인프로세스 EventBus
 │   ├── main_agent/
-│   │   ├── codex.py           # Codex Coordinator
-│   │   └── runtime.py         # report와 feedback 수명주기
+│   │   └── runtime.py         # 코드 기반 assignment, report, 수명주기 관리
 │   ├── platforms/
 │   │   ├── base.py            # PlatformAdapter Protocol
 │   │   ├── ctfd.py            # 미구현 CTFd 경계
@@ -204,13 +188,13 @@ TERMINATED
 
 | 컴포넌트 | 현재 구현 | 남은 작업 |
 |---|---|---|
-| Coordinator | 장기 `AsyncCodex` Thread | 재시작 후 Thread 복구 |
+| Coordinator | 일반 Python 코드 기반 scheduling과 lifecycle | 재시작 후 Run 복구 |
 | Worker | Challenge당 단일 모델 Codex Thread | Docker/Pod 내부 실행 |
 | Poller | 5초 snapshot 비교와 이벤트 생성 | 플랫폼별 cursor 또는 webhook |
 | Queue | FIFO pending queue | 우선순위 정책 |
 | Scheduler | 최대 3개 로컬 비동기 실행 | Docker/Kubernetes Scheduler |
 | Platform | Protocol, Memory Adapter, CTFd placeholder | 실제 CTFd API 연결 |
-| Repository | 인메모리 Worker record | PostgreSQL 저장소 |
+| Repository | 전체 WorkerReport를 보존하는 인메모리 Worker record | PostgreSQL 저장소 |
 | Object Store | 로컬 workspace | S3/MinIO 연결 |
 | Events | 인프로세스 EventBus | Event API와 SSE |
 | Flag 제출 | Submission Broker 경계 | 검증, 중복 방지, rate limit |
@@ -224,10 +208,15 @@ TERMINATED
 
 ### Conda 환경 생성
 
+프로젝트 루트에서 다음 명령을 실행한다.
+
 ```bash
+cd Team_Ddalggack
 conda env create -f environment.yml
 conda activate ddalggack
 ```
+
+`environment.yml`은 프로젝트를 editable mode와 개발 의존성(`pytest`, `build`)까지 함께 설치한다. 환경 생성 후 `ddalggack` 명령을 바로 사용할 수 있다.
 
 환경 파일이 변경된 경우 다음 명령으로 동기화한다.
 
@@ -238,6 +227,12 @@ conda activate ddalggack
 
 `pyproject.toml`에는 공식 Python SDK인 `openai-codex`가 포함되어 있다.
 
+Conda를 사용하지 않는 경우 Python 3.11 이상의 가상 환경에서 다음과 같이 설치할 수 있다.
+
+```bash
+python -m pip install -e ".[dev]"
+```
+
 ## 실행
 
 ### 오프라인 smoke
@@ -245,13 +240,16 @@ conda activate ddalggack
 다음 명령은 `MemoryPlatformAdapter`와 `DemoWorkerRunner`를 사용한다. 실제 CTF를 풀거나 Codex API를 호출하지 않고 Worker 생성, 보고, 종료 흐름만 검사한다.
 
 ```bash
+conda activate ddalggack
 ddalggack smoke --workers 3
 ```
+
+`--workers`에는 1부터 3까지 지정할 수 있다. 생략하면 3개를 사용한다.
 
 모듈을 직접 실행할 수도 있다.
 
 ```bash
-PYTHONPATH=src python -m ctf_harness.cli smoke --workers 3
+python -m ctf_harness.cli smoke --workers 3
 ```
 
 정상 실행 시 `completed_workers`가 3이고 `active_workers_after_cleanup`이 0으로 나온다.
@@ -262,38 +260,57 @@ PYTHONPATH=src python -m ctf_harness.cli smoke --workers 3
   "challenges": 3,
   "completed_workers": 3,
   "active_workers_after_cleanup": 0,
-  "events": 14,
+  "events": 11,
   "worker_states": {
-    "smoke-run-pwn-1": "terminated",
-    "smoke-run-rev-1": "terminated",
-    "smoke-run-web-1": "terminated"
+    "smoke-run-pwn-1": "completed",
+    "smoke-run-rev-1": "completed",
+    "smoke-run-web-1": "completed"
   }
 }
 ```
 
-### 실제 Codex 하네스 조립
+### 실제 Codex Worker 실행
 
-실제 실행은 `build_codex_harness()`에 `PlatformAdapter` 구현을 주입한다.
+현재 CLI는 오프라인 smoke만 제공한다. 실제 대회를 감시하고 Codex Worker를 실행하려면 `PlatformAdapter` 구현을 준비하고 `build_codex_harness()`에 주입한다.
+
+예를 들어 `run_harness.py`를 다음과 같이 작성한다. `MyPlatformAdapter`는 사용자가 구현한 Adapter로 교체한다.
 
 ```python
 import asyncio
 from pathlib import Path
 
 from ctf_harness.app import build_codex_harness
+from my_platform import MyPlatformAdapter
 
-platform = MyPlatformAdapter(...)
-harness = build_codex_harness(
-    platform=platform,
-    runs_root=Path("runs"),
-    coordinator_model="gpt-5.4",
-    worker_model="gpt-5.4",
-    max_swarms=3,
-    poll_interval_s=5.0,
-)
+async def main() -> None:
+    platform = MyPlatformAdapter(...)
+    harness = build_codex_harness(
+        platform=platform,
+        runs_root=Path("runs"),
+        worker_model="gpt-5.4",
+        max_swarms=3,
+        poll_interval_s=5.0,
+    )
 
-stop = asyncio.Event()
-asyncio.run(harness.workflow.run_live("competition-001", stop))
+    stop = asyncio.Event()
+    try:
+        result = await harness.workflow.run_live("competition-001", stop)
+        print(result)
+    finally:
+        stop.set()
+
+if __name__ == "__main__":
+    asyncio.run(main())
 ```
+
+Codex 로그인 세션 또는 API 인증이 준비된 환경에서 실행한다.
+
+```bash
+conda activate ddalggack
+python run_harness.py
+```
+
+`run_live()`는 중지 이벤트가 설정될 때까지 플랫폼을 감시한다. 터미널에서 `Ctrl+C`로 중단하면 실행 중인 Worker task와 SDK runtime을 정리한다. Worker report와 최종 상태는 실행 중인 프로세스의 `harness.repository`에 인메모리로 남으며, 프로세스를 종료하면 사라진다.
 
 `PlatformAdapter`는 다음 메서드를 구현한다.
 
@@ -329,10 +346,10 @@ python -m build
 - 4번째 이후 Challenge의 pending 처리
 - 슬롯 반환 후 다음 Challenge 실행
 - 외부 solve에 따른 pending 제거와 Swarm 취소
-- 장기 Coordinator Thread 재사용
-- Coordinator turn 직렬화
+- LLM 없이 Challenge 데이터로 WorkerAssignment 생성
+- Main runtime의 report 및 상태 기록
 - Worker의 단일 모델 사용
-- Coordinator feedback을 이용한 Worker 후속 turn
+- Worker의 Challenge 해석과 자체 전략 수립
 - SDK runtime 오류의 `failed` report 변환
 - 완료 후 Scheduler runtime 제거
 
@@ -351,7 +368,7 @@ python -m build
 
 1. 실제 CTFd Platform Adapter를 연결한다.
 2. Docker 기반 Worker Scheduler와 카테고리별 Tool Image를 구현한다.
-3. report, feedback, transcript를 PostgreSQL에 영구 저장한다.
+3. report와 transcript를 PostgreSQL에 영구 저장한다.
 4. workspace와 artifact를 S3 또는 MinIO에 저장한다.
 5. Submission Broker에 중복 방지와 rate limit을 추가한다.
 6. Temporal을 사용해 장기 실행과 재시작 복구를 구현한다.

@@ -1,6 +1,6 @@
 import asyncio
 from collections.abc import Awaitable, Callable
-from ctf_harness.protocol import Feedback, WorkerAssignment, WorkerReport
+from ctf_harness.protocol import WorkerAssignment, WorkerReport
 from ctf_harness.worker import WorkerRunner
 
 class LocalWorkerScheduler:
@@ -12,7 +12,7 @@ class LocalWorkerScheduler:
         self.semaphore = asyncio.Semaphore(max_workers)
         self.tasks: dict[str, asyncio.Task[WorkerReport]] = {}
 
-    def spawn(self, assignment: WorkerAssignment, report: Callable[[WorkerReport], Awaitable[Feedback | None]]) -> None:
+    def spawn(self, assignment: WorkerAssignment, report: Callable[[WorkerReport], Awaitable[None]]) -> None:
         if assignment.worker_id in self.tasks:
             raise ValueError(f"duplicate worker id: {assignment.worker_id}")
         async def execute() -> WorkerReport:

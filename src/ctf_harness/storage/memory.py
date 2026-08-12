@@ -1,5 +1,6 @@
 from pathlib import Path
 from ctf_harness.domain.models import WorkerRecord, WorkerStatus
+from ctf_harness.protocol import WorkerReport
 
 class MemoryRunRepository:
     def __init__(self) -> None:
@@ -8,8 +9,8 @@ class MemoryRunRepository:
         self.workers[record.worker_id] = record
     async def set_worker_status(self, worker_id: str, status: WorkerStatus) -> None:
         self.workers[worker_id].status = status
-    async def append_report(self, worker_id: str, summary: str) -> None:
-        self.workers[worker_id].reports.append(summary)
+    async def append_report(self, worker_id: str, report: WorkerReport) -> None:
+        self.workers[worker_id].reports.append(report)
 
 class LocalObjectStore:
     def __init__(self, root: Path):

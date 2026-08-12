@@ -1,3 +1,3 @@
-from .messages import Feedback, ReportKind, WorkerAssignment, WorkerReport, to_json
+from .messages import ReportKind, WorkerAssignment, WorkerReport, to_json
 
-__all__ = ["Feedback", "ReportKind", "WorkerAssignment", "WorkerReport", "to_json"]
+__all__ = ["ReportKind", "WorkerAssignment", "WorkerReport", "to_json"]

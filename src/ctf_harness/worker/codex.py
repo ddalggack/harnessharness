@@ -10,7 +10,8 @@ from ctf_harness.worker.runner import ReportCallback
 
 WORKER_INSTRUCTIONS = """You are an autonomous CTF worker assigned exactly one challenge.
 Work only inside the assigned workspace. Perform the analysis and verification yourself.
-Report meaningful checkpoints or blockers, not individual tool calls. A completed report
+Report meaningful checkpoints, completion, or terminal failures, not individual tool calls.
+A failed report includes any condition you cannot resolve autonomously. A completed report
 must describe real reproduced evidence; model prose alone is not proof. Return only JSON
 matching the supplied output schema."""
 
@@ -81,23 +82,30 @@ class CodexWorkerRunner:
                 if sandbox is not None:
                     kwargs["sandbox"] = sandbox
                 thread = await client.thread_start(**kwargs)
+                connection = (
+                    f"{assignment.host}:{assignment.port}"
+                    if assignment.host is not None and assignment.port is not None
+                    else "not provided"
+                )
                 prompt = (
-                    f"Objective: {assignment.objective}\n"
+                    "You received one CTF challenge. Interpret the challenge data and decide "
+                    "your own analysis and solving strategy.\n"
                     f"Challenge ID: {assignment.challenge_id}\n"
-                    f"Profile: {assignment.profile}\n"
+                    f"Title: {assignment.challenge_title}\n"
+                    f"Category: {assignment.challenge_category}\n"
+                    f"Description: {assignment.challenge_description}\n"
+                    f"Connection: {connection}\n"
+                    f"Workspace: {workspace}\n"
                     "Begin autonomously and return the next meaningful report."
                 )
 
                 for _ in range(self.max_turns):
                     result = await thread.run(prompt, output_schema=REPORT_SCHEMA)
                     worker_report = _report_from_response(assignment, result.final_response)
-                    feedback = await report(worker_report)
+                    await report(worker_report)
                     if worker_report.kind in {ReportKind.COMPLETED, ReportKind.FAILED}:
                         return worker_report
-                    if feedback is not None:
-                        prompt = f"Coordinator feedback: {feedback.directive}\nContinue autonomously."
-                    else:
-                        prompt = "Continue autonomously and return the next meaningful report."
+                    prompt = "Continue autonomously and return the next meaningful report."
         except Exception as exc:
             failed = WorkerReport(
                 assignment.run_id,
