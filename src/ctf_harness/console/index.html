@@ -4,8 +4,8 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="color-scheme" content="light" />
-    <title>HarneHarness</title>
-    <meta name="description" content="Python Worker를 제어하는 버튼식 로컬 CTF 하네스" />
+    <title>CTF Run Harness</title>
+    <meta name="description" content="Ddalggack Python 백엔드를 제어하는 로컬 CTF 대시보드" />
     <link rel="stylesheet" href="/styles.css" />
   </head>
   <body>
@@ -15,7 +15,7 @@
           <div class="brand-mark" aria-hidden="true"><span>H</span><i></i></div>
           <div>
             <p class="eyebrow">AUTHORIZED LOCAL CTF OPERATIONS</p>
-            <h1>HarneHarness</h1>
+            <h1>CTF Run Harness</h1>
           </div>
         </div>
         <div class="topbar-actions">
@@ -80,17 +80,9 @@
             </label>
           </div>
 
-          <label class="switch-row flag-submit-switch" for="auto-submit-flags">
-            <span>
-              <strong>플래그 자동 제출</strong>
-              <small>로컬 CTFd에서만 정답 후보를 자동 제출</small>
-            </span>
-            <input id="auto-submit-flags" type="checkbox" role="switch" disabled />
-          </label>
-
           <button id="connect-button" type="button" class="button secondary full-width">
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 12h11m0 0-4-4m4 4-4 4M20 5v14" /></svg>
-            <span>문제 불러오기</span>
+            <span>환경 확인</span>
           </button>
 
           <div class="safety-note">
@@ -123,24 +115,24 @@
           </section>
 
           <section class="metric-grid" aria-label="실행 요약">
-            <article class="metric-card"><span>전체 문제</span><strong id="metric-total">0</strong><small>선택된 문제</small></article>
-            <article class="metric-card"><span>정답 확인</span><strong id="metric-solved">0</strong><small>정답 승인 기준</small></article>
-            <article class="metric-card"><span>작업 중인 Worker</span><strong id="metric-workers">0/3</strong><small>최대 3개</small></article>
+            <article class="metric-card"><span>불러온 문제</span><strong id="metric-total">0</strong><small>selected challenges</small></article>
+            <article class="metric-card"><span>완료 Worker</span><strong id="metric-solved">0</strong><small>completed reports</small></article>
+            <article class="metric-card"><span>활성 Worker</span><strong id="metric-workers">0/3</strong><small>hard concurrency cap</small></article>
             <article class="metric-card"><span>진행률</span><strong id="metric-progress">0%</strong><small id="metric-status">IDLE</small></article>
           </section>
 
           <section class="console-grid">
             <article class="surface worker-surface">
               <div class="surface-heading">
-                <div><span class="step-number">03</span><h2>Worker 현황</h2></div>
-                <span class="mono-label">JSON I/O · PROCESS ISOLATED</span>
+                <div><span class="step-number">03</span><h2>Worker Rack</h2></div>
+                <span class="mono-label">CODEX THREAD · CHALLENGE ISOLATED</span>
               </div>
               <div id="worker-list" class="worker-list"></div>
             </article>
 
             <article class="surface challenge-surface">
               <div class="surface-heading">
-                <div><span class="step-number">04</span><h2>문제 목록</h2></div>
+                <div><span class="step-number">04</span><h2>Challenge Queue</h2></div>
                 <div class="queue-filter" role="group" aria-label="문제 필터">
                   <button type="button" class="active" data-filter="all">전체</button>
                   <button type="button" data-filter="pwn">PWN</button>
@@ -164,7 +156,7 @@
 
           <section class="surface event-surface">
             <div class="surface-heading">
-              <div><span class="step-number">05</span><h2>실행 기록</h2></div>
+              <div><span class="step-number">05</span><h2>Live Event Log</h2></div>
               <span class="live-label"><i></i> LIVE</span>
             </div>
             <div id="event-log" class="event-log" aria-live="polite"></div>

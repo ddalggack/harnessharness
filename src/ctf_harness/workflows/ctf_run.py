@@ -13,7 +13,6 @@ from ctf_harness.poller import PlatformPoller, PollEventKind
 from ctf_harness.protocol import ReportKind, WorkerReport
 from ctf_harness.scheduler import LocalWorkerScheduler
 from ctf_harness.storage import LocalObjectStore, MemoryRunRepository
-from ctf_harness.submissions import SubmissionBroker
 
 
 @dataclass(frozen=True, slots=True)
@@ -35,7 +34,6 @@ class CtfRunWorkflow:
         main: MainAgentRuntime | None = None,
         worker_model: str = "gpt-5.4",
         poll_interval_s: float = 5.0,
-        auto_submit_flags: bool = False,
     ) -> None:
         self.platform = platform
         self.scheduler = scheduler
@@ -45,8 +43,6 @@ class CtfRunWorkflow:
         self.main = main or MainAgentRuntime(repository, events)
         self.worker_model = worker_model
         self.poll_interval_s = poll_interval_s
-        self.auto_submit_flags = auto_submit_flags
-        self.submission_broker = SubmissionBroker(platform)
 
     async def _schedule(self, run_id: str, challenge: Challenge) -> bool:
         worker_id = f"{run_id}-{challenge.id}"
@@ -85,31 +81,8 @@ class CtfRunWorkflow:
             else:
                 if final_report.kind is ReportKind.COMPLETED:
                     completed += 1
-                    await self._submit_candidate(final_report)
             self.scheduler.remove(worker_id)
         return completed
-
-    async def _submit_candidate(self, report: WorkerReport) -> None:
-        candidate = report.flag_candidate
-        if not self.auto_submit_flags or not candidate or not candidate.strip():
-            return
-        try:
-            accepted = await self.submission_broker.submit(report.challenge_id, candidate)
-        except Exception as exc:
-            await self.events.publish(
-                "submission.failed",
-                run_id=report.run_id,
-                worker_id=report.worker_id,
-                challenge_id=report.challenge_id,
-                error_type=type(exc).__name__,
-            )
-            return
-        await self.events.publish(
-            "submission.accepted" if accepted else "submission.rejected",
-            run_id=report.run_id,
-            worker_id=report.worker_id,
-            challenge_id=report.challenge_id,
-        )
 
     async def _record_runtime_failure(
         self, run_id: str, worker_id: str, exc: BaseException

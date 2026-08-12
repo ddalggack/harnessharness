@@ -6,7 +6,6 @@
   let state = null;
   let selectedMode = "demo";
   let workerLimit = 3;
-  let autoSubmitFlags = false;
   let challengeFilter = "all";
   let polling = false;
   let toastTimer = null;
@@ -72,9 +71,7 @@
     $("#run-button").disabled = !connected || running;
     $("#stop-button").disabled = !running;
     $("#connect-button").disabled = running;
-    $("#connect-button").querySelector("span").textContent = connected ? "문제 다시 불러오기" : "문제 불러오기";
-    $("#auto-submit-flags").checked = autoSubmitFlags;
-    $("#auto-submit-flags").disabled = selectedMode !== "ctfd" || running;
+    $("#connect-button").querySelector("span").textContent = connected ? "환경 다시 확인" : "환경 확인";
 
     $("#metric-total").textContent = state.run.total || state.challenges.length;
     $("#metric-solved").textContent = state.run.solved;
@@ -130,12 +127,9 @@
 
   function updateMode(mode) {
     selectedMode = mode;
-    if (mode !== "ctfd") autoSubmitFlags = false;
     $$("[data-mode]").forEach((button) => button.classList.toggle("active", button.dataset.mode === mode));
     $("#ctfd-fields").classList.toggle("hidden", mode !== "ctfd");
     $("#ctfd-options").classList.toggle("hidden", mode !== "ctfd");
-    $("#auto-submit-flags").checked = autoSubmitFlags;
-    $("#auto-submit-flags").disabled = mode !== "ctfd";
   }
 
   async function connect() {
@@ -147,12 +141,10 @@
       baseUrl: $("#base-url").value.trim(),
       apiToken: $("#api-token").value,
       authorized: $("#authorized").checked,
-      autoSubmitFlags: selectedMode === "ctfd" && autoSubmitFlags,
     };
     setBusy($("#connect-button"), true, "확인 중…");
     try {
       state = await api("/api/connect", { method: "POST", body: payload });
-      autoSubmitFlags = Boolean(state.config.autoSubmitFlags);
       $("#api-token").value = "";
       render();
       showToast(`${state.connection.label}에서 문제 ${state.challenges.length}개를 불러왔습니다.`);
@@ -166,10 +158,7 @@
   async function startRun() {
     setBusy($("#run-button"), true, "시작 중…");
     try {
-      state = await api("/api/run", {
-        method: "POST",
-        body: { autoSubmitFlags: selectedMode === "ctfd" && autoSubmitFlags },
-      });
+      state = await api("/api/run", { method: "POST" });
       render();
       showToast("Ddalggack Worker 실행을 시작했습니다.");
     } catch (error) {
@@ -194,7 +183,7 @@
     button.disabled = busy;
     if (text) button.textContent = text;
     if (!busy && button.dataset.originalText) {
-      if (button.id === "connect-button") button.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 12h11m0 0-4-4m4 4-4 4M20 5v14"></path></svg><span>문제 불러오기</span>';
+      if (button.id === "connect-button") button.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 12h11m0 0-4-4m4 4-4 4M20 5v14"></path></svg><span>환경 확인</span>';
       else if (button.id === "run-button") button.innerHTML = '<span class="play-icon" aria-hidden="true"></span><span>자동 풀이 시작</span>';
       else button.textContent = button.dataset.originalText;
     }
@@ -231,9 +220,6 @@
     workerLimit = Number(button.dataset.workerLimit);
     $$("[data-worker-limit]").forEach((item) => item.classList.toggle("active", item === button));
   }));
-  $("#auto-submit-flags").addEventListener("change", (event) => {
-    autoSubmitFlags = selectedMode === "ctfd" && event.target.checked;
-  });
   $$("[data-filter]").forEach((button) => button.addEventListener("click", () => {
     challengeFilter = button.dataset.filter;
     $$("[data-filter]").forEach((item) => item.classList.toggle("active", item === button));
