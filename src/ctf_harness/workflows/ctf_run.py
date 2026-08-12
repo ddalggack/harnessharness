@@ -43,6 +43,18 @@ class CtfRunWorkflow:
         self.main = main or MainAgentRuntime(repository, events)
         self.worker_model = worker_model
         self.poll_interval_s = poll_interval_s
+        self._worker_slots: dict[str, int] = {}
+
+    def _allocate_worker_slot(self, worker_id: str) -> int:
+        used = set(self._worker_slots.values())
+        for slot in range(1, self.scheduler.max_workers + 1):
+            if slot not in used:
+                self._worker_slots[worker_id] = slot
+                return slot
+        raise RuntimeError("no display worker slot is available")
+
+    def _release_worker_slot(self, worker_id: str) -> None:
+        self._worker_slots.pop(worker_id, None)
 
     async def _schedule(self, run_id: str, challenge: Challenge) -> bool:
         worker_id = f"{run_id}-{challenge.id}"
@@ -53,18 +65,26 @@ class CtfRunWorkflow:
 
         workspace = self.object_store.challenge_workspace(run_id, challenge.id)
         await self.platform.download_challenge(challenge, workspace)
-        assignment = await self.main.create_assignment(
-            run_id, worker_id, challenge, workspace, self.worker_model
-        )
-        profile_name = challenge.category or "general"
-        profile = WorkerProfile(
-            profile_name,
-            f"ddalggack/worker-{profile_name}:latest",
-        )
-        await self.main.register(
-            WorkerRecord(worker_id, challenge.id, profile, assignment.model)
-        )
-        self.scheduler.spawn(assignment, self.main.handle_report)
+        worker_number = self._allocate_worker_slot(worker_id)
+        try:
+            assignment = await self.main.create_assignment(
+                run_id, worker_id, challenge, workspace, self.worker_model, worker_number
+            )
+            profile_name = challenge.category or "general"
+            profile = WorkerProfile(
+                profile_name,
+                f"ddalggack/worker-{profile_name}:latest",
+            )
+            await self.main.register(
+                WorkerRecord(worker_id, challenge.id, profile, assignment.model),
+                worker_number=worker_number,
+                challenge_title=challenge.title,
+                challenge_category=challenge.category,
+            )
+            self.scheduler.spawn(assignment, self.main.handle_report)
+        except Exception:
+            self._release_worker_slot(worker_id)
+            raise
         return True
 
     async def _reap_finished(self, run_id: str) -> int:
@@ -82,6 +102,7 @@ class CtfRunWorkflow:
                 if final_report.kind is ReportKind.COMPLETED:
                     completed += 1
             self.scheduler.remove(worker_id)
+            self._release_worker_slot(worker_id)
         return completed
 
     async def _record_runtime_failure(
@@ -111,6 +132,7 @@ class CtfRunWorkflow:
             elif (exc := task.exception()) is not None:
                 await self._record_runtime_failure(run_id, worker_id, exc)
             self.scheduler.remove(worker_id)
+            self._release_worker_slot(worker_id)
 
     async def run(self, run_id: str) -> CtfRunResult:
         """Process the current unsolved snapshot using an explicit pending queue."""
