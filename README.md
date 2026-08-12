@@ -4,7 +4,7 @@ Ddalggack은 여러 CTF 문제를 Codex Agent에게 나누어 맡기고 실행 �
 
 코드 기반 Run Coordinator는 대회 전체 흐름을 관리하고, 각 Swarm은 할당된 문제 하나를 독립적으로 풀이한다. Coordinator는 Worker의 명령, 도구 사용, 풀이 전략을 결정하지 않는다. Challenge 정보를 그대로 WorkerAssignment에 담고 Worker report와 수명주기만 기록한다.
 
-> 현재 버전은 일반 Python 코드 기반 Coordinator, Codex Python SDK 기반 Worker, 5초 Poller, FIFO pending queue, 최대 3개 Swarm 동시 실행을 구현한다. CTFd 연동과 Docker 격리, 영구 저장소는 아직 구현하지 않았다.
+> 현재 버전은 일반 Python 코드 기반 Coordinator, Codex Python SDK 기반 Worker, CTFd 연동, 실시간 진행 이벤트, 선택적 Flag 자동 제출, FIFO pending queue, 최대 3개 Swarm 동시 실행을 구현한다.
 
 ## 핵심 원칙
 
@@ -80,6 +80,7 @@ Coordinator에는 `AsyncCodex` client나 공유 Coordinator Thread가 없다. �
 `CodexWorkerRunner`는 전달받은 Challenge 제목, 카테고리, 설명, 접속 정보와 workspace를 해석한다. Worker가 자체 분석 계획과 풀이 전략을 정한 뒤 다음 report 중 하나를 구조화된 JSON으로 반환한다.
 
 - `checkpoint`: 의미 있는 중간 상태
+- `flag_candidate`: Coordinator가 검증·제출할 Flag 후보
 - `completed`: 풀이와 검증을 마친 상태
 - `failed`: Worker가 자율적으로 해결할 수 없는 장애를 포함한 종료 실패 상태
 
@@ -109,6 +110,7 @@ RUNNING
    │
    ├─ CHECKPOINT → 같은 Thread에서 계속 실행
    │
+   ├─ FLAG_CANDIDATE → 제출 성공 시 COMPLETED, 거절 시 같은 Thread 계속
    ├─ COMPLETED / FAILED → 최종 결과 상태 보존
    │
    └─ 외부 solve 또는 Run 취소 → TERMINATED
@@ -193,36 +195,27 @@ RUNNING
 | Poller | 5초 snapshot 비교와 이벤트 생성 | 플랫폼별 cursor 또는 webhook |
 | Queue | FIFO pending queue | 우선순위 정책 |
 | Scheduler | 최대 3개 로컬 비동기 실행 | Docker/Kubernetes Scheduler |
-| Platform | Protocol, Memory Adapter, CTFd placeholder | 실제 CTFd API 연결 |
+| Platform | Protocol, Memory Adapter, CTFd v1 API Adapter | 플랫폼별 인증·rate limit 확장 |
 | Repository | 전체 WorkerReport를 보존하는 인메모리 Worker record | PostgreSQL 저장소 |
 | Object Store | 로컬 workspace | S3/MinIO 연결 |
-| Events | 인프로세스 EventBus | Event API와 SSE |
-| Flag 제출 | Submission Broker 경계 | 검증, 중복 방지, rate limit |
+| Events | 인프로세스 EventBus, JSONL 이벤트, 최신 status JSON | Event API와 SSE |
+| Flag 제출 | 선택적 자동 제출, 중복 방지, 문제별 lock, 오답 제한 | 플랫폼별 rate limit |
 
 ## 설치
 
 ### 요구 사항
 
-- Miniconda 또는 Python 3.11 이상
+- Python 3.11 이상
 - Codex 로그인 세션 또는 Codex API 인증
 
-### Conda 환경 생성
+### venv 환경 생성
 
-프로젝트 루트에서 다음 명령을 실행한다.
-
-```bash
-cd Team_Ddalggack
-conda env create -f environment.yml
-conda activate ddalggack
-```
-
-`environment.yml`은 프로젝트를 editable mode와 개발 의존성(`pytest`, `build`)까지 함께 설치한다. 환경 생성 후 `ddalggack` 명령을 바로 사용할 수 있다.
-
-환경 파일이 변경된 경우 다음 명령으로 동기화한다.
+프로젝트 루트에서 다음 명령을 실행한다. Conda는 필요하지 않다.
 
 ```bash
-conda env update -f environment.yml --prune
-conda activate ddalggack
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -e ".[dev]"
 ```
 
 `pyproject.toml`에는 공식 Python SDK인 `openai-codex`가 포함되어 있다.
@@ -250,7 +243,7 @@ ddalggack dashboard
 다음 명령은 `MemoryPlatformAdapter`와 `DemoWorkerRunner`를 사용한다. 실제 CTF를 풀거나 Codex API를 호출하지 않고 Worker 생성, 보고, 종료 흐름만 검사한다.
 
 ```bash
-conda activate ddalggack
+source .venv/bin/activate
 ddalggack smoke --workers 3
 ```
 
@@ -305,7 +298,7 @@ printf '%s' "$OPENAI_API_KEY" | codex login --with-api-key
 인증 후 실제 Codex Worker 데모를 실행한다.
 
 ```bash
-conda activate ddalggack
+source .venv/bin/activate
 ddalggack codex-demo --model gpt-5.4
 ```
 
@@ -335,14 +328,16 @@ ddalggack codex-demo --model gpt-5.4 --runs-root runs
 CTFd에서 Access Token을 발급한 뒤 환경 변수로 전달한다. Token을 명령행 인자나 저장소 파일에 직접 기록하지 않는 방식을 권장한다.
 
 ```bash
-conda activate ddalggack
+source .venv/bin/activate
 export CTFD_TOKEN="..."
 ddalggack ctfd-run \
   --url https://ctf.example.com \
-  --model gpt-5.4 \
+  --model gpt-5.5 \
   --max-swarms 3 \
   --run-id competition-001 \
-  --runs-root runs
+  --runs-root runs \
+  --submit-flags \
+  --max-wrong-submissions 3
 ```
 
 `--token`으로 Token을 직접 전달할 수도 있지만 shell history에 남을 수 있다.
@@ -357,7 +352,42 @@ ddalggack ctfd-run --url https://ctf.example.com --token "..."
 runs/<run-id>/challenges/<challenge-id>/
 ```
 
-최대 3개 Worker를 병렬로 실행하며 초과 Challenge는 FIFO queue에서 기다린다. 실행이 끝나면 Worker 상태와 전체 structured report를 JSON으로 출력한다. 하나 이상의 Worker가 `failed` 또는 `terminated`이면 exit code `1`을 반환한다.
+최대 3개 Worker를 병렬로 실행하며 초과 Challenge는 FIFO queue에서 기다린다. 진행 로그는 stderr에 즉시 출력되고, 최종 결과 JSON은 stdout에 출력된다. 하나 이상의 Worker가 `failed` 또는 `terminated`이면 exit code `1`을 반환한다.
+
+다른 터미널에서 진행 상황을 확인할 수 있다.
+
+```bash
+tail -f runs/competition-001/events.jsonl
+watch -n 1 cat runs/competition-001/status.json
+```
+
+`--progress-json`은 콘솔 진행 로그를 JSONL로 출력하고 `--quiet`은 콘솔 진행 로그만 끈다. 두 경우 모두 `events.jsonl`과 `status.json`은 기록된다. `--heartbeat-interval 15`로 장시간 SDK turn의 생존 로그 간격을 조절할 수 있다.
+
+기본 진행 화면은 병렬 Worker 출력이 뒤섞이지 않도록 배정과 실제 solve만 표시한다. `[1]`부터 `[max-swarms]`까지는 백엔드 Agent ID가 아니라 화면상의 실행 슬롯이며, 한 문제가 끝나면 같은 번호와 색상으로 다음 문제를 맡는다.
+
+```text
+[1] worker handles baby-bof
+[2] worker handles admin-login
+[1] worker solved baby-bof
+```
+
+가장 최근 Run의 특정 실행 슬롯이 주고받은 메시지, reasoning summary, shell 명령과 출력, MCP 도구 호출, 파일 변경을 다른 터미널에서 실시간으로 확인한다. 기본 화면은 그 슬롯의 현재 또는 가장 최근 문제만 재생하고, 슬롯이 다음 문제를 맡으면 자동 전환한다. 긴 출력과 skill 문서는 접어서 표시한다.
+
+```bash
+ddalggack seek worker 1
+```
+
+특정 Run을 지정하거나 현재 기록만 읽고 종료할 수도 있다.
+
+```bash
+ddalggack seek worker 2 --run-id competition-001
+ddalggack seek worker 2 --run-id competition-001 --no-follow
+ddalggack seek worker 2 --run-id competition-001 --raw
+```
+
+`seek`의 `intent`는 SDK가 제공한 직전 reasoning summary를 도구 호출에 연결한 값이다. 모델의 비공개 원문 chain-of-thought는 제공하지 않는다. 상세 로그에는 명령 출력과 Flag 후보가 포함될 수 있으므로 run 디렉터리 접근 권한을 제한해야 한다.
+
+Flag 자동 제출은 안전을 위해 `--submit-flags`를 지정한 경우에만 활성화된다. 같은 문제의 같은 후보는 한 번만 제출하며 문제별 제출을 직렬화한다. 거절된 후보는 같은 Codex Thread에 피드백되어 분석을 계속하고, N번째 오답이 `--max-wrong-submissions N`에 도달하는 즉시 해당 Worker를 실패로 종료한다. 네트워크 오류만 제한적으로 재시도하며 인증 토큰은 이벤트에 기록하지 않는다. Flag 후보는 운영 기록인 `events.jsonl`과 최종 report에 포함되므로 run 디렉터리 접근 권한을 제한해야 한다.
 
 현재 `ctfd-run`은 **한 번의 snapshot 실행**이다. 대회 중 새 문제와 외부 solve를 계속 감시하는 `run_live()` workflow는 코드에 있지만 이를 노출하는 장기 실행 CLI 명령은 아직 추가하지 않았다.
 
@@ -370,7 +400,7 @@ async def download_challenge(challenge, destination) -> Path: ...
 async def submit_flag(challenge_id, flag) -> bool: ...
 ```
 
-Worker의 `flag_candidate`는 report에 보존되지만 현재 workflow가 자동으로 `submit_flag()`를 호출하지는 않는다. 모델의 주장만으로 Flag를 제출하지 않기 위한 의도적인 경계다.
+Worker는 CTFd 인증 정보를 받지 않는다. `flag_candidate`는 Coordinator의 `SubmissionBroker`만 제출하며 플랫폼이 정답으로 승인한 뒤에 Worker를 완료 처리한다. `--submit-flags`가 없으면 후보를 기록하되 제출하지 않는다.
 
 ## 테스트와 빌드
 
@@ -407,10 +437,9 @@ python -m build
 ## 제한 사항
 
 - `ctfd-run`은 시작 시점의 CTFd snapshot만 처리하며 장기 polling CLI는 아직 제공하지 않는다.
-- 현재 Repository와 EventBus는 인메모리 구현이라 프로세스를 재시작하면 사라진다.
+- Worker Repository는 인메모리 구현이지만 run 이벤트와 최신 상태는 `events.jsonl`, `status.json`에 남는다.
 - 현재 Worker는 로컬 workspace와 Codex `workspace_write` sandbox를 사용한다.
 - Docker 또는 Kubernetes 수준의 격리는 아직 제공하지 않는다.
-- Flag 자동 검증과 제출 정책은 아직 구현하지 않았다.
 - Temporal, PostgreSQL, MinIO, Event API는 아직 연결하지 않았다.
 
 신뢰할 수 없는 Challenge 파일을 실전에서 실행하기 전에는 Docker 기반 Worker Scheduler를 연결해야 한다.
@@ -421,7 +450,7 @@ python -m build
 2. Docker 기반 Worker Scheduler와 카테고리별 Tool Image를 구현한다.
 3. report와 transcript를 PostgreSQL에 영구 저장한다.
 4. workspace와 artifact를 S3 또는 MinIO에 저장한다.
-5. Submission Broker에 중복 방지와 rate limit을 추가한다.
+5. Submission Broker에 플랫폼별 rate limit 정책을 추가한다.
 6. Temporal을 사용해 장기 실행과 재시작 복구를 구현한다.
 7. Event API와 Dashboard를 구현한다.
 

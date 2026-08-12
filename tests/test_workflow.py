@@ -11,6 +11,26 @@ from ctf_harness.worker import DemoWorkerRunner
 from ctf_harness.workflows import CtfRunWorkflow
 
 class WorkflowTests(unittest.TestCase):
+    def test_display_worker_slot_is_reused_after_completion(self):
+        async def scenario():
+            challenges = [Challenge("one", "One", "pwn"), Challenge("two", "Two", "rev")]
+            repo, events = MemoryRunRepository(), EventBus()
+            scheduler = LocalWorkerScheduler(DemoWorkerRunner, 1)
+            with tempfile.TemporaryDirectory() as tmp:
+                await CtfRunWorkflow(
+                    MemoryPlatformAdapter(challenges),
+                    scheduler,
+                    repo,
+                    LocalObjectStore(Path(tmp)),
+                    events,
+                ).run("run-slots")
+
+            started = [event for event in events.history if event.type == "worker.started"]
+            self.assertEqual([event.payload["worker_number"] for event in started], [1, 1])
+            self.assertEqual([event.payload["challenge_title"] for event in started], ["One", "Two"])
+
+        asyncio.run(scenario())
+
     def test_workers_complete_and_are_removed(self):
         async def scenario():
             repo, events = MemoryRunRepository(), EventBus()
