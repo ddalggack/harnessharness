@@ -51,11 +51,6 @@
     toastTimer = setTimeout(() => { toast.className = "toast"; }, 3200);
   }
 
-  function formatTime(value) {
-    if (!value) return "--:--:--";
-    return new Date(value).toLocaleTimeString("ko-KR", { hour12: false });
-  }
-
   function render() {
     if (!state) return;
     const running = state.run.status === "running";
@@ -84,7 +79,6 @@
 
     renderWorkers();
     renderChallenges();
-    renderEvents();
   }
 
   function renderWorkers() {
@@ -113,19 +107,6 @@
         <td>${escapeHtml(challenge.workerId || "—")}</td>
         <td><span class="status-tag ${escapeHtml(challenge.status)}">${escapeHtml(statusLabels[challenge.status] || challenge.status)}</span><span class="challenge-sub">${escapeHtml(challenge.phase)}</span></td>
       </tr>`).join("");
-  }
-
-  function renderEvents() {
-    if (state.events.length === 0) {
-      $("#event-log").innerHTML = '<div class="event-empty">이벤트를 기다리고 있습니다.</div>';
-      return;
-    }
-    $("#event-log").innerHTML = state.events.slice(0, 80).map((event) => `
-      <div class="event-row ${escapeHtml(event.level)}">
-        <span class="event-time">${escapeHtml(formatTime(event.time))}</span>
-        <span class="event-type">${escapeHtml(event.type)}</span>
-        <span class="event-message">${escapeHtml(event.message)}</span>
-      </div>`).join("");
   }
 
   function updateMode(mode) {

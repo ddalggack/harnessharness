@@ -246,18 +246,6 @@ class DashboardController:
             })
         return rows
 
-    def _event_rows(self) -> list[dict[str, str]]:
-        if not self.harness:
-            return []
-        rows = []
-        for event in reversed(self.harness.events.history[-80:]):
-            level = "error" if "failed" in event.type else "success" if event.type.endswith("completed") else "info"
-            subject = event.payload.get("challenge_id") or event.payload.get("worker_id") or event.payload.get("run_id") or ""
-            kind = event.payload.get("kind")
-            message = " · ".join(str(item) for item in (subject, kind) if item)
-            rows.append({"time": event.occurred_at, "type": event.type, "message": message, "level": level})
-        return rows
-
     def public_state(self) -> dict[str, Any]:
         running = self.run_future is not None and not self.run_future.done()
         status = "running" if running else "idle"
@@ -303,7 +291,6 @@ class DashboardController:
             },
             "workers": self._worker_rows(),
             "challenges": challenge_rows,
-            "events": self._event_rows(),
         }
 
     def shutdown(self) -> None:
