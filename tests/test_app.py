@@ -21,12 +21,6 @@ class HarnessWiringTests(unittest.TestCase):
         self.assertEqual(harness.workflow.worker_model, "gpt-5.4-mini")
         self.assertFalse(hasattr(harness, "coordinator"))
 
-    def test_ctfd_adapter_is_an_explicit_unimplemented_boundary(self):
-        async def scenario() -> None:
-            adapter = CTFdPlatformAdapter("https://ctf.invalid")
-            with self.assertRaisesRegex(NotImplementedError, "CTFd adapter"):
-                await adapter.list_challenges()
-            with self.assertRaisesRegex(NotImplementedError, "CTFd adapter"):
-                await adapter.list_solved_challenge_ids()
-
-        asyncio.run(scenario())
+    def test_ctfd_adapter_validates_base_url(self):
+        with self.assertRaisesRegex(ValueError, "base_url"):
+            CTFdPlatformAdapter("ctf.invalid")

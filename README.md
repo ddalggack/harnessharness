@@ -269,50 +269,89 @@ python -m ctf_harness.cli smoke --workers 3
 }
 ```
 
-### 실제 Codex Worker 실행
+### Codex API 호출 데모
 
-현재 CLI는 오프라인 smoke만 제공한다. 실제 대회를 감시하고 Codex Worker를 실행하려면 `PlatformAdapter` 구현을 준비하고 `build_codex_harness()`에 주입한다.
+다음 명령은 `DemoWorkerRunner`가 아니라 실제 `CodexWorkerRunner`를 실행한다. 로컬 Codex 로그인 세션을 사용해 Codex Thread 하나를 생성하고, API 연결 확인용 Challenge 하나를 전달한 뒤 structured `WorkerReport`를 인메모리에 저장한다.
 
-예를 들어 `run_harness.py`를 다음과 같이 작성한다. `MyPlatformAdapter`는 사용자가 구현한 Adapter로 교체한다.
+먼저 인증 상태를 확인한다.
 
-```python
-import asyncio
-from pathlib import Path
-
-from ctf_harness.app import build_codex_harness
-from my_platform import MyPlatformAdapter
-
-async def main() -> None:
-    platform = MyPlatformAdapter(...)
-    harness = build_codex_harness(
-        platform=platform,
-        runs_root=Path("runs"),
-        worker_model="gpt-5.4",
-        max_swarms=3,
-        poll_interval_s=5.0,
-    )
-
-    stop = asyncio.Event()
-    try:
-        result = await harness.workflow.run_live("competition-001", stop)
-        print(result)
-    finally:
-        stop.set()
-
-if __name__ == "__main__":
-    asyncio.run(main())
+```bash
+codex login status
 ```
 
-Codex 로그인 세션 또는 API 인증이 준비된 환경에서 실행한다.
+로그인되어 있지 않으면 ChatGPT 계정으로 로그인한다.
+
+```bash
+codex login
+```
+
+OpenAI API key를 사용하려면 환경 변수의 값을 stdin으로 전달한다.
+
+```bash
+export OPENAI_API_KEY="..."
+printf '%s' "$OPENAI_API_KEY" | codex login --with-api-key
+```
+
+인증 후 실제 Codex Worker 데모를 실행한다.
 
 ```bash
 conda activate ddalggack
-python run_harness.py
+ddalggack codex-demo --model gpt-5.4
 ```
 
-`run_live()`는 중지 이벤트가 설정될 때까지 플랫폼을 감시한다. 터미널에서 `Ctrl+C`로 중단하면 실행 중인 Worker task와 SDK runtime을 정리한다. Worker report와 최종 상태는 실행 중인 프로세스의 `harness.repository`에 인메모리로 남으며, 프로세스를 종료하면 사라진다.
+모듈로 직접 실행할 수도 있다.
 
-`PlatformAdapter`는 다음 메서드를 구현한다.
+```bash
+python -m ctf_harness.cli codex-demo --model gpt-5.4
+```
+
+workspace 위치를 바꾸려면 `--runs-root`를 지정한다.
+
+```bash
+ddalggack codex-demo --model gpt-5.4 --runs-root runs
+```
+
+정상 실행 시 프로세스는 exit code `0`을 반환하고 Worker 상태와 전체 report를 JSON으로 출력한다. 인증, 모델 또는 SDK 호출에 실패하면 exit code `1`을 반환하며 원인은 `failed` report의 `summary`에 기록된다. 이 명령은 실제 모델 사용량이 발생할 수 있다.
+
+### 실제 Codex Worker 실행
+
+`CTFdPlatformAdapter`는 CTFd v1 API를 실제로 호출한다. 다음 항목을 지원한다.
+
+- `GET /api/v1/challenges`: Challenge 목록과 solve 상태 조회
+- `GET /api/v1/challenges/{id}`: 설명, 접속 정보, 첨부 파일 URL 조회
+- Challenge 상세 응답의 `files` URL: workspace로 첨부 파일 다운로드
+- `POST /api/v1/challenges/attempt`: Flag 제출 및 `correct` 결과 확인
+
+CTFd에서 Access Token을 발급한 뒤 환경 변수로 전달한다. Token을 명령행 인자나 저장소 파일에 직접 기록하지 않는 방식을 권장한다.
+
+```bash
+conda activate ddalggack
+export CTFD_TOKEN="..."
+ddalggack ctfd-run \
+  --url https://ctf.example.com \
+  --model gpt-5.4 \
+  --max-swarms 3 \
+  --run-id competition-001 \
+  --runs-root runs
+```
+
+`--token`으로 Token을 직접 전달할 수도 있지만 shell history에 남을 수 있다.
+
+```bash
+ddalggack ctfd-run --url https://ctf.example.com --token "..."
+```
+
+`ctfd-run`은 시작 시점의 Challenge snapshot을 가져오고 이미 solve된 문제를 제외한 각 Challenge를 독립 Codex Worker에 배정한다. Challenge 첨부 파일과 `challenge.json`은 다음 경로에 저장한다.
+
+```text
+runs/<run-id>/challenges/<challenge-id>/
+```
+
+최대 3개 Worker를 병렬로 실행하며 초과 Challenge는 FIFO queue에서 기다린다. 실행이 끝나면 Worker 상태와 전체 structured report를 JSON으로 출력한다. 하나 이상의 Worker가 `failed` 또는 `terminated`이면 exit code `1`을 반환한다.
+
+현재 `ctfd-run`은 **한 번의 snapshot 실행**이다. 대회 중 새 문제와 외부 solve를 계속 감시하는 `run_live()` workflow는 코드에 있지만 이를 노출하는 장기 실행 CLI 명령은 아직 추가하지 않았다.
+
+`CTFdPlatformAdapter`는 `PlatformAdapter`의 다음 계약을 구현한다.
 
 ```python
 async def list_challenges() -> list[Challenge]: ...
@@ -321,7 +360,7 @@ async def download_challenge(challenge, destination) -> Path: ...
 async def submit_flag(challenge_id, flag) -> bool: ...
 ```
 
-현재 `CTFdPlatformAdapter`는 모든 메서드에서 `NotImplementedError`를 발생시킨다. 별도로 개발하는 CTFd client를 이 경계에 연결해야 한다.
+Worker의 `flag_candidate`는 report에 보존되지만 현재 workflow가 자동으로 `submit_flag()`를 호출하지는 않는다. 모델의 주장만으로 Flag를 제출하지 않기 위한 의도적인 경계다.
 
 ## 테스트와 빌드
 
@@ -348,6 +387,8 @@ python -m build
 - 외부 solve에 따른 pending 제거와 Swarm 취소
 - LLM 없이 Challenge 데이터로 WorkerAssignment 생성
 - Main runtime의 report 및 상태 기록
+- CTFd Challenge 목록·상세·solve 상태 조회
+- CTFd Token 인증, 첨부 파일 다운로드, Flag 제출 응답 처리
 - Worker의 단일 모델 사용
 - Worker의 Challenge 해석과 자체 전략 수립
 - SDK runtime 오류의 `failed` report 변환
@@ -355,7 +396,7 @@ python -m build
 
 ## 제한 사항
 
-- 실제 CTFd API는 아직 구현하지 않았다.
+- `ctfd-run`은 시작 시점의 CTFd snapshot만 처리하며 장기 polling CLI는 아직 제공하지 않는다.
 - 현재 Repository와 EventBus는 인메모리 구현이라 프로세스를 재시작하면 사라진다.
 - 현재 Worker는 로컬 workspace와 Codex `workspace_write` sandbox를 사용한다.
 - Docker 또는 Kubernetes 수준의 격리는 아직 제공하지 않는다.
@@ -366,7 +407,7 @@ python -m build
 
 ## 로드맵
 
-1. 실제 CTFd Platform Adapter를 연결한다.
+1. `run_live()`를 사용하는 장기 실행 CTFd polling CLI를 추가한다.
 2. Docker 기반 Worker Scheduler와 카테고리별 Tool Image를 구현한다.
 3. report와 transcript를 PostgreSQL에 영구 저장한다.
 4. workspace와 artifact를 S3 또는 MinIO에 저장한다.
