@@ -26,6 +26,7 @@ def build_codex_harness(
     worker_model: str = "gpt-5.4",
     max_swarms: int = 3,
     poll_interval_s: float = 5.0,
+    auto_submit_flags: bool = False,
 ) -> CodexHarness:
     """Wire deterministic run coordination to per-challenge Codex workers."""
     root = runs_root.resolve()
@@ -42,5 +43,6 @@ def build_codex_harness(
         main=main,
         worker_model=worker_model,
         poll_interval_s=poll_interval_s,
+        auto_submit_flags=auto_submit_flags,
     )
     return CodexHarness(workflow, scheduler, repository, events)

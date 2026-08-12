@@ -26,6 +26,9 @@ _CONTENT_TYPES = {
     ".html": "text/html; charset=utf-8",
     ".css": "text/css; charset=utf-8",
     ".js": "text/javascript; charset=utf-8",
+    ".ttf": "font/ttf",
+    ".txt": "text/plain; charset=utf-8",
+    ".md": "text/markdown; charset=utf-8",
 }
 _DEMO_CHALLENGES = (
     Challenge("pwn-01", "Warm-up Stack", "pwn", "Demo lifecycle challenge"),
@@ -75,6 +78,7 @@ class DashboardController:
         self.mode = "demo"
         self.connection_label = ""
         self.worker_limit = 3
+        self.auto_submit_flags = False
         self.run_id: str | None = None
         self.run_future: Future[Any] | None = None
         self.last_error: str | None = None
@@ -101,6 +105,7 @@ class DashboardController:
         self.harness = None
         self.challenges = []
         self.connection_label = ""
+        self.auto_submit_flags = False
         self.run_id = None
         self.run_future = None
         self.last_error = None
@@ -116,8 +121,10 @@ class DashboardController:
         worker_limit = int(payload.get("workerLimit", 3))
         if not 1 <= worker_limit <= 3:
             raise ValueError("동시 Worker 수는 1~3이어야 합니다.")
+        auto_submit_flags = bool(payload.get("autoSubmitFlags", False))
 
         if mode == "demo":
+            auto_submit_flags = False
             challenges = [item for item in _DEMO_CHALLENGES if item.category in categories]
             platform: PlatformAdapter = MemoryPlatformAdapter(challenges)
             label = "안전 Demo"
@@ -140,6 +147,7 @@ class DashboardController:
         self.challenges = challenges
         self.connection_label = label
         self.worker_limit = worker_limit
+        self.auto_submit_flags = auto_submit_flags
         self.harness = None
         self.run_id = None
         self.run_future = None
@@ -153,6 +161,7 @@ class DashboardController:
                 platform=self.platform,
                 runs_root=self.runs_root,
                 max_swarms=self.worker_limit,
+                auto_submit_flags=self.auto_submit_flags,
             )
         repository, events = MemoryRunRepository(), EventBus()
         scheduler = LocalWorkerScheduler(DemoWorkerRunner, max_workers=self.worker_limit)
@@ -163,14 +172,17 @@ class DashboardController:
             LocalObjectStore(self.runs_root),
             events,
             main=MainAgentRuntime(repository, events),
+            auto_submit_flags=False,
         )
         return CodexHarness(workflow, scheduler, repository, events)
 
-    def start(self) -> dict[str, Any]:
+    def start(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         if self.platform is None:
             raise RuntimeError("먼저 환경을 확인해야 합니다.")
         if self.run_future is not None and not self.run_future.done():
             raise RuntimeError("이미 실행 중입니다.")
+        requested_auto_submit = bool((payload or {}).get("autoSubmitFlags", False))
+        self.auto_submit_flags = self.mode == "ctfd" and requested_auto_submit
         self.harness = self._build_harness()
         self.run_id = datetime.now(timezone.utc).strftime("dashboard-%Y%m%d-%H%M%S")
         self.last_error = None
@@ -277,7 +289,11 @@ class DashboardController:
         return {
             "environment": {"pythonVersion": __import__("platform").python_version()},
             "connection": {"connected": self.platform is not None, "label": self.connection_label},
-            "config": {"workerLimit": self.worker_limit, "mode": self.mode},
+            "config": {
+                "workerLimit": self.worker_limit,
+                "mode": self.mode,
+                "autoSubmitFlags": self.auto_submit_flags,
+            },
             "run": {
                 "id": self.run_id,
                 "status": status,
@@ -353,7 +369,7 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
                 value = self.controller.connect(self._body())
                 status = HTTPStatus.OK
             elif path == "/api/run":
-                value = self.controller.start()
+                value = self.controller.start(self._body())
                 status = HTTPStatus.ACCEPTED
             elif path == "/api/stop":
                 value = self.controller.stop()

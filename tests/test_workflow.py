@@ -11,6 +11,48 @@ from ctf_harness.worker import DemoWorkerRunner
 from ctf_harness.workflows import CtfRunWorkflow
 
 class WorkflowTests(unittest.TestCase):
+    def test_flag_candidates_are_submitted_only_when_auto_submit_is_enabled(self):
+        async def scenario(auto_submit_flags: bool):
+            from ctf_harness.protocol import ReportKind, WorkerReport
+
+            class FlagRunner:
+                async def run(self, assignment, report):
+                    completed = WorkerReport(
+                        assignment.run_id,
+                        assignment.worker_id,
+                        assignment.challenge_id,
+                        ReportKind.COMPLETED,
+                        "candidate ready",
+                        flag_candidate="FLAG{candidate}",
+                    )
+                    await report(completed)
+                    return completed
+
+            platform = MemoryPlatformAdapter([Challenge("one", "One", "pwn")])
+            repo, events = MemoryRunRepository(), EventBus()
+            scheduler = LocalWorkerScheduler(FlagRunner, 1)
+            with tempfile.TemporaryDirectory() as tmp:
+                await CtfRunWorkflow(
+                    platform,
+                    scheduler,
+                    repo,
+                    LocalObjectStore(Path(tmp)),
+                    events,
+                    auto_submit_flags=auto_submit_flags,
+                ).run(f"run-submit-{auto_submit_flags}")
+            return platform, events
+
+        disabled_platform, disabled_events = asyncio.run(scenario(False))
+        enabled_platform, enabled_events = asyncio.run(scenario(True))
+
+        self.assertEqual(disabled_platform.submissions, [])
+        self.assertEqual(enabled_platform.submissions, [("one", "FLAG{candidate}")])
+        submission_event = next(
+            event for event in enabled_events.history if event.type == "submission.accepted"
+        )
+        self.assertEqual(submission_event.payload["challenge_id"], "one")
+        self.assertNotIn("FLAG{candidate}", repr(submission_event.payload))
+
     def test_workers_complete_and_are_removed(self):
         async def scenario():
             repo, events = MemoryRunRepository(), EventBus()
