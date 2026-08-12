@@ -26,6 +26,9 @@ _CONTENT_TYPES = {
     ".html": "text/html; charset=utf-8",
     ".css": "text/css; charset=utf-8",
     ".js": "text/javascript; charset=utf-8",
+    ".ttf": "font/ttf",
+    ".txt": "text/plain; charset=utf-8",
+    ".md": "text/markdown; charset=utf-8",
 }
 _DEMO_CHALLENGES = (
     Challenge("pwn-01", "Warm-up Stack", "pwn", "Demo lifecycle challenge"),

@@ -72,7 +72,7 @@
     $("#run-button").disabled = !connected || running;
     $("#stop-button").disabled = !running;
     $("#connect-button").disabled = running;
-    $("#connect-button").querySelector("span").textContent = connected ? "환경 다시 확인" : "환경 확인";
+    $("#connect-button").querySelector("span").textContent = connected ? "문제 다시 불러오기" : "문제 불러오기";
     $("#auto-submit-flags").checked = autoSubmitFlags;
     $("#auto-submit-flags").disabled = selectedMode !== "ctfd" || running;
 
@@ -194,7 +194,7 @@
     button.disabled = busy;
     if (text) button.textContent = text;
     if (!busy && button.dataset.originalText) {
-      if (button.id === "connect-button") button.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 12h11m0 0-4-4m4 4-4 4M20 5v14"></path></svg><span>환경 확인</span>';
+      if (button.id === "connect-button") button.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 12h11m0 0-4-4m4 4-4 4M20 5v14"></path></svg><span>문제 불러오기</span>';
       else if (button.id === "run-button") button.innerHTML = '<span class="play-icon" aria-hidden="true"></span><span>자동 풀이 시작</span>';
       else button.textContent = button.dataset.originalText;
     }
