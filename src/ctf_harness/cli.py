@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from ctf_harness.app import build_codex_harness
+from ctf_harness.dashboard import serve_dashboard
 from ctf_harness.domain import Challenge
 from ctf_harness.events import EventBus
 from ctf_harness.platforms import CTFdPlatformAdapter, MemoryPlatformAdapter
@@ -184,6 +185,11 @@ def main() -> int:
     ctfd_run.add_argument("--run-id", default="ctfd-run")
     ctfd_run.add_argument("--timeout", type=float, default=30.0)
 
+    dashboard = commands.add_parser("dashboard", help="serve the local web dashboard")
+    dashboard.add_argument("--host", default="127.0.0.1")
+    dashboard.add_argument("--port", type=int, default=8788)
+    dashboard.add_argument("--runs-root", type=Path, default=Path("runs"))
+
     args = parser.parse_args()
     if args.command == "smoke":
         return asyncio.run(_smoke(args.workers))
@@ -201,6 +207,9 @@ def main() -> int:
                 args.timeout,
             )
         )
+    if args.command == "dashboard":
+        serve_dashboard(args.host, args.port, args.runs_root)
+        return 0
     return 2
 
 

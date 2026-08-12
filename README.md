@@ -235,6 +235,16 @@ python -m pip install -e ".[dev]"
 
 ## 실행
 
+### 웹 Dashboard
+
+`Ddalggack_GUI`의 웹 화면을 현재 Python 하네스에 연결한 Dashboard는 다음 명령으로 실행한다.
+
+```bash
+ddalggack dashboard
+```
+
+브라우저에서 `http://127.0.0.1:8788`을 열면 Demo 또는 CTFd 연결, 실행/중지/초기화, Worker·Challenge·Event 상태 확인이 가능하다. Demo 모드는 실제 Codex 호출 없이 `DemoWorkerRunner`로 동작하고, CTFd 모드는 현재 `build_codex_harness()` 백엔드를 사용한다.
+
 ### 오프라인 smoke
 
 다음 명령은 `MemoryPlatformAdapter`와 `DemoWorkerRunner`를 사용한다. 실제 CTF를 풀거나 Codex API를 호출하지 않고 Worker 생성, 보고, 종료 흐름만 검사한다.

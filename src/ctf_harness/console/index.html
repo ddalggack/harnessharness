@@ -1,0 +1,171 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light" />
+    <title>CTF Run Harness</title>
+    <meta name="description" content="Ddalggack Python 백엔드를 제어하는 로컬 CTF 대시보드" />
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="topbar">
+        <div class="brand">
+          <div class="brand-mark" aria-hidden="true"><span>H</span><i></i></div>
+          <div>
+            <p class="eyebrow">AUTHORIZED LOCAL CTF OPERATIONS</p>
+            <h1>CTF Run Harness</h1>
+          </div>
+        </div>
+        <div class="topbar-actions">
+          <div class="system-pill" id="system-pill"><span class="signal"></span><span>API 확인 중</span></div>
+          <button class="icon-button" id="export-button" type="button" title="현재 상태 JSON 저장" aria-label="현재 상태 JSON 저장">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12m0 0 4-4m-4 4-4-4M5 17v3h14v-3" /></svg>
+          </button>
+        </div>
+      </header>
+
+      <div class="workspace">
+        <aside class="control-panel" aria-label="실행 설정">
+          <div class="panel-heading">
+            <div>
+              <span class="step-number">01</span>
+              <h2>대상 연결</h2>
+            </div>
+            <span class="connection-badge" id="connection-badge">연결 전</span>
+          </div>
+
+          <div class="segmented" role="group" aria-label="실행 모드">
+            <button type="button" class="segment active" data-mode="demo">안전 Demo</button>
+            <button type="button" class="segment" data-mode="ctfd">로컬 CTFd</button>
+          </div>
+
+          <div id="ctfd-fields" class="conditional-fields hidden">
+            <label class="field">
+              <span>CTFd URL</span>
+              <input id="base-url" type="url" placeholder="http://127.0.0.1:8000" autocomplete="url" />
+              <small>localhost·사설망 주소만 허용</small>
+            </label>
+            <label class="field">
+              <span>API Token</span>
+              <input id="api-token" type="password" placeholder="CTFd Access Token" autocomplete="off" />
+              <small>메모리에만 보관하며 화면·로그에 출력하지 않음</small>
+            </label>
+          </div>
+
+          <fieldset class="fieldset">
+            <legend>문제 분야</legend>
+            <div class="check-row">
+              <label class="check-chip"><input type="checkbox" name="category" value="pwn" checked /><span>PWN</span></label>
+              <label class="check-chip"><input type="checkbox" name="category" value="rev" checked /><span>REV</span></label>
+              <label class="check-chip"><input type="checkbox" name="category" value="web" checked /><span>WEB</span></label>
+            </div>
+          </fieldset>
+
+          <fieldset class="fieldset">
+            <legend>동시 Worker</legend>
+            <div class="counter-control" role="group" aria-label="동시 Worker 수">
+              <button type="button" data-worker-limit="1">1</button>
+              <button type="button" data-worker-limit="2">2</button>
+              <button type="button" data-worker-limit="3" class="active">3</button>
+            </div>
+            <p class="field-note">노트북 보호를 위해 최대 3개로 고정</p>
+          </fieldset>
+
+          <div id="ctfd-options" class="option-stack hidden">
+            <label class="authorization-check">
+              <input id="authorized" type="checkbox" />
+              <span>본인 소유 또는 명시적으로 허가된 로컬 CTFd입니다.</span>
+            </label>
+          </div>
+
+          <button id="connect-button" type="button" class="button secondary full-width">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 12h11m0 0-4-4m4 4-4 4M20 5v14" /></svg>
+            <span>환경 확인</span>
+          </button>
+
+          <div class="safety-note">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 4.5 6v5.2c0 4.6 3.2 8.5 7.5 9.8 4.3-1.3 7.5-5.2 7.5-9.8V6L12 3Z" /><path d="m9 12 2 2 4-4" /></svg>
+            <p><strong>로컬 전용 안전장치</strong><br />공인 인터넷 CTF 주소는 API 단계에서 차단합니다.</p>
+          </div>
+        </aside>
+
+        <main class="main-console">
+          <section class="launch-card" aria-labelledby="launch-title">
+            <div class="launch-copy">
+              <span class="step-number inverted">02</span>
+              <div>
+                <p class="run-kicker" id="run-kicker">READY FOR CHECK</p>
+                <h2 id="launch-title">문제를 가져오고 Worker를 출발시키세요.</h2>
+                <p id="run-message">왼쪽에서 Demo 또는 로컬 CTFd 환경을 먼저 확인합니다.</p>
+              </div>
+            </div>
+            <div class="launch-actions">
+              <button id="run-button" type="button" class="button primary" disabled>
+                <span class="play-icon" aria-hidden="true"></span>
+                <span>자동 풀이 시작</span>
+              </button>
+              <button id="stop-button" type="button" class="button danger" disabled>중지</button>
+              <button id="reset-button" type="button" class="text-button">초기화</button>
+            </div>
+            <div class="progress-track" aria-label="전체 실행 진행률">
+              <div class="progress-fill" id="run-progress" style="width: 0%"></div>
+            </div>
+          </section>
+
+          <section class="metric-grid" aria-label="실행 요약">
+            <article class="metric-card"><span>불러온 문제</span><strong id="metric-total">0</strong><small>selected challenges</small></article>
+            <article class="metric-card"><span>완료 Worker</span><strong id="metric-solved">0</strong><small>completed reports</small></article>
+            <article class="metric-card"><span>활성 Worker</span><strong id="metric-workers">0/3</strong><small>hard concurrency cap</small></article>
+            <article class="metric-card"><span>진행률</span><strong id="metric-progress">0%</strong><small id="metric-status">IDLE</small></article>
+          </section>
+
+          <section class="console-grid">
+            <article class="surface worker-surface">
+              <div class="surface-heading">
+                <div><span class="step-number">03</span><h2>Worker Rack</h2></div>
+                <span class="mono-label">CODEX THREAD · CHALLENGE ISOLATED</span>
+              </div>
+              <div id="worker-list" class="worker-list"></div>
+            </article>
+
+            <article class="surface challenge-surface">
+              <div class="surface-heading">
+                <div><span class="step-number">04</span><h2>Challenge Queue</h2></div>
+                <div class="queue-filter" role="group" aria-label="문제 필터">
+                  <button type="button" class="active" data-filter="all">전체</button>
+                  <button type="button" data-filter="pwn">PWN</button>
+                  <button type="button" data-filter="rev">REV</button>
+                  <button type="button" data-filter="web">WEB</button>
+                </div>
+              </div>
+              <div class="table-wrap">
+                <table>
+                  <thead><tr><th>문제</th><th>분야</th><th>Worker</th><th>상태</th></tr></thead>
+                  <tbody id="challenge-table"></tbody>
+                </table>
+                <div id="empty-challenges" class="empty-state">
+                  <div class="empty-orbit"><i></i><span>0</span></div>
+                  <h3>아직 불러온 문제가 없습니다</h3>
+                  <p>안전 Demo는 외부 서버 없이 즉시 시험할 수 있습니다.</p>
+                </div>
+              </div>
+            </article>
+          </section>
+
+          <section class="surface event-surface">
+            <div class="surface-heading">
+              <div><span class="step-number">05</span><h2>Live Event Log</h2></div>
+              <span class="live-label"><i></i> LIVE</span>
+            </div>
+            <div id="event-log" class="event-log" aria-live="polite"></div>
+          </section>
+        </main>
+      </div>
+    </div>
+
+    <div id="toast" class="toast" role="status" aria-live="polite"></div>
+    <script src="/app.js" defer></script>
+  </body>
+</html>
