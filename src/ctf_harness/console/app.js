@@ -10,6 +10,13 @@
   let challengeFilter = "all";
   let polling = false;
   let toastTimer = null;
+  let selectedWorkerIndex = null;
+  let observedRunId;
+  let eventRunId = null;
+  let eventCursor = 0;
+  let renderedWorkersSignature = null;
+  const workerObservations = new Map();
+  const workerLogs = new Map();
 
   const statusLabels = {
     queued: "대기",
@@ -30,6 +37,212 @@
       .replace(/>/g, "&gt;")
       .replace(/"/g, "&quot;")
       .replace(/'/g, "&#039;");
+  }
+
+  function formatClock(value) {
+    return new Date(value).toLocaleTimeString("ko-KR", { hour12: false });
+  }
+
+  function formatDuration(startedAt, finishedAt) {
+    if (!startedAt) return "00:00";
+    const started = typeof startedAt === "number" ? startedAt : Date.parse(startedAt);
+    const finished = finishedAt
+      ? (typeof finishedAt === "number" ? finishedAt : Date.parse(finishedAt))
+      : Date.now();
+    if (!Number.isFinite(started) || !Number.isFinite(finished)) return "00:00";
+    const totalSeconds = Math.max(0, Math.floor((finished - started) / 1000));
+    const hours = Math.floor(totalSeconds / 3600);
+    const minutes = Math.floor((totalSeconds % 3600) / 60);
+    const seconds = totalSeconds % 60;
+    const short = `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
+    return hours > 0 ? `${String(hours).padStart(2, "0")}:${short}` : short;
+  }
+
+  function challengeForWorker(worker) {
+    if (!state || !worker || !worker.challengeName) return null;
+    return state.challenges.find((challenge) => challenge.name === worker.challengeName) || null;
+  }
+
+  function modelForWorker(worker) {
+    if (worker && worker.model) return String(worker.model);
+    if (state && state.config && state.config.workerModel) return String(state.config.workerModel);
+    return selectedMode === "demo" ? "Demo Worker" : "gpt-5.4";
+  }
+
+  function tokensForWorker(worker) {
+    const usage = worker && (worker.tokenUsage ?? worker.tokens ?? worker.usage);
+    if (typeof usage === "number" && Number.isFinite(usage)) {
+      return `${Math.max(0, usage).toLocaleString("ko-KR")} tokens`;
+    }
+    if (usage && typeof usage === "object") {
+      const nestedTotal = usage.total && typeof usage.total === "object" ? usage.total : null;
+      const total = usage.total_tokens
+        ?? usage.totalTokens
+        ?? (nestedTotal && (nestedTotal.total_tokens ?? nestedTotal.totalTokens))
+        ?? (typeof usage.total === "number" ? usage.total : null);
+      if (typeof total === "number" && Number.isFinite(total)) {
+        return `${Math.max(0, total).toLocaleString("ko-KR")} tokens`;
+      }
+    }
+    if (typeof usage === "string" && usage.trim()) return usage.trim();
+    return "수집 안 됨";
+  }
+
+  function logLevelForStatus(status) {
+    if (status === "completed" || status === "solved") return "success";
+    if (status === "failed") return "error";
+    if (status === "terminated" || status === "needs_tooling") return "warning";
+    return "info";
+  }
+
+  function compactLogValue(value, limit) {
+    if (value == null || value === "") return "";
+    let text;
+    if (typeof value === "string") text = value;
+    else {
+      try { text = JSON.stringify(value); }
+      catch { text = String(value); }
+    }
+    text = text.replace(/\s+/g, " ").trim();
+    const max = limit || 360;
+    return text.length <= max ? text : `${text.slice(0, max - 1)}…`;
+  }
+
+  function eventWorkerIndex(payload) {
+    const number = Number(payload && (payload.worker_number ?? payload.workerNumber));
+    if (Number.isInteger(number) && number >= 1 && number <= 3) return number - 1;
+    if (!state || !payload || !payload.worker_id) return -1;
+    return state.workers.findIndex((worker) => worker.workerId === payload.worker_id);
+  }
+
+  function eventLogEntry(event) {
+    const payload = event.payload || {};
+    const status = payload.status || "";
+    const challenge = payload.challenge_title || payload.challenge_id || "";
+    const elapsed = Number(payload.elapsed_s);
+    const elapsedText = Number.isFinite(elapsed) ? ` · ${elapsed.toFixed(1)}초` : "";
+    const tool = compactLogValue(payload.tool) || "도구";
+    const finished = status === "completed";
+    const detail = compactLogValue(
+      payload.command
+      ?? payload.query
+      ?? payload.arguments
+      ?? payload.output
+      ?? payload.result
+      ?? payload.changes
+      ?? payload.content
+      ?? payload.summary
+      ?? payload.intent
+    );
+
+    switch (event.type) {
+      case "worker.started":
+        return { type: "시작", message: `${challenge || "문제"} · Worker 시작`, level: "info" };
+      case "worker.turn_started":
+        return { type: "분석", message: `Turn ${payload.turn || 1} 시작`, level: "info" };
+      case "worker.turn_completed":
+        return { type: "분석", message: `Turn ${payload.turn || 1} 완료${elapsedText}`, level: "success" };
+      case "worker.heartbeat":
+        return { type: "작업 중", message: detail || `Worker 실행 중${elapsedText}`, level: "info" };
+      case "worker.reasoning":
+        return { type: "추론", message: detail || "추론 진행 중", level: "info" };
+      case "worker.tool": {
+        const exitCode = payload.exit_code ?? payload.exitCode;
+        const exitText = exitCode == null ? "" : ` · exit ${exitCode}`;
+        return {
+          type: tool,
+          message: `${finished ? "완료" : "실행"}${exitText}${detail ? ` · ${detail}` : ""}`,
+          level: payload.error || (exitCode != null && Number(exitCode) !== 0) ? "error" : (finished ? "success" : "info"),
+        };
+      }
+      case "worker.file_change":
+        return { type: "파일 변경", message: detail || "Worker가 파일을 수정했습니다.", level: "info" };
+      case "worker.message":
+        return { type: "메시지", message: detail || `${payload.role || "assistant"} 메시지`, level: "info" };
+      case "worker.token_usage":
+        return { type: "토큰", message: tokensForWorker({ tokenUsage: payload.usage }), level: "info" };
+      case "worker.reported":
+        return {
+          type: String(payload.kind || "보고"),
+          message: compactLogValue(payload.summary) || "Worker 보고 수신",
+          level: logLevelForStatus(payload.kind),
+        };
+      case "worker.terminated":
+        return { type: "중지", message: "Worker 실행 중지", level: "warning" };
+      default:
+        if (event.type.startsWith("submission.")) {
+          const result = event.type.split(".", 2)[1];
+          const failed = ["rejected", "error", "wrong_limit"].includes(result);
+          return {
+            type: "플래그 제출",
+            message: compactLogValue(payload.summary) || result,
+            level: result === "accepted" ? "success" : (failed ? "error" : "warning"),
+          };
+        }
+        return null;
+    }
+  }
+
+  function ingestWorkerEvents(events) {
+    (events || []).forEach((event) => {
+      const index = eventWorkerIndex(event.payload || {});
+      const entry = eventLogEntry(event);
+      if (index < 0 || !entry) return;
+      const key = String(index);
+      const entries = workerLogs.get(key) || [];
+      entries.push({ ...entry, time: event.occurredAt || Date.now() });
+      workerLogs.set(key, entries.slice(-160));
+    });
+  }
+
+  async function pollWorkerEvents() {
+    if (!state || !state.run.id) {
+      if (eventRunId !== null) {
+        eventRunId = null;
+        eventCursor = 0;
+        workerLogs.clear();
+      }
+      return;
+    }
+    if (state.run.id !== eventRunId) {
+      eventRunId = state.run.id;
+      eventCursor = 0;
+      workerLogs.clear();
+    }
+    let hasMore = true;
+    while (hasMore) {
+      const batch = await api(`/api/events?cursor=${eventCursor}`);
+      if (batch.runId !== state.run.id) {
+        eventRunId = batch.runId || null;
+        eventCursor = 0;
+        workerLogs.clear();
+        return;
+      }
+      ingestWorkerEvents(batch.events);
+      eventCursor = Number(batch.nextCursor) || eventCursor;
+      hasMore = Boolean(batch.hasMore);
+    }
+  }
+
+  function observeWorkers() {
+    if (!state) return;
+    const runId = state.run.id || null;
+    if (runId !== observedRunId) {
+      observedRunId = runId;
+      renderedWorkersSignature = null;
+      workerObservations.clear();
+    }
+
+    state.workers.forEach((worker, index) => {
+      const key = String(index);
+      const observation = workerObservations.get(key) || {
+        startedAt: null,
+        finishedAt: null,
+      };
+      observation.startedAt = worker.startedAt || observation.startedAt;
+      observation.finishedAt = worker.finishedAt || null;
+      workerObservations.set(key, observation);
+    });
   }
 
   async function api(path, options) {
@@ -53,48 +266,127 @@
 
   function render() {
     if (!state) return;
+    observeWorkers();
     const running = state.run.status === "running";
     const connected = state.connection.connected;
-    const activeWorkers = state.workers.filter((worker) => worker.status === "running").length;
 
     $("#system-pill").className = "system-pill online";
     $("#system-pill").innerHTML = `<span class="signal"></span><span>LOCAL API · PYTHON ${escapeHtml(state.environment.pythonVersion)}</span>`;
     $("#connection-badge").textContent = connected ? state.connection.label : "연결 전";
     $("#connection-badge").className = `connection-badge${connected ? " connected" : ""}`;
-    $("#run-message").textContent = state.run.message;
+    $("#run-message").textContent = connected
+      ? state.run.message
+      : "좌측 사이드바에서 대상 CTF를 먼저 연결합니다.";
     $("#run-kicker").textContent = state.run.status.toUpperCase();
     $("#run-progress").style.width = `${state.run.progress}%`;
     $("#run-button").disabled = !connected || running;
     $("#stop-button").disabled = !running;
     $("#connect-button").disabled = running;
-    $("#connect-button").querySelector("span").textContent = connected ? "문제 다시 불러오기" : "문제 불러오기";
+    const connectLabel = $("#connect-button").querySelector("span");
+    if (connectLabel) connectLabel.textContent = connected ? "문제 다시 불러오기" : "문제 불러오기";
     $("#auto-submit-flags").checked = autoSubmitFlags;
     $("#auto-submit-flags").disabled = selectedMode !== "ctfd" || running;
 
     $("#metric-total").textContent = state.run.total || state.challenges.length;
     $("#metric-solved").textContent = state.run.solved;
-    $("#metric-workers").textContent = `${activeWorkers}/${state.config.workerLimit}`;
     $("#metric-progress").textContent = `${state.run.progress}%`;
     $("#metric-status").textContent = state.run.status.toUpperCase();
 
     renderWorkers();
     renderChallenges();
+    if ($("#worker-dialog").open) renderWorkerDialog();
+    if ($("#worker-log-dialog").open) renderWorkerLogs(false);
   }
 
   function renderWorkers() {
-    $("#worker-list").innerHTML = state.workers.map((worker) => {
+    const signature = JSON.stringify(state.workers.map((worker) => [
+      worker.name,
+      worker.enabled,
+      worker.status,
+      worker.challengeName,
+      worker.profile,
+      worker.phase,
+      worker.progress,
+      worker.completed,
+      worker.tokenUsage,
+      worker.startedAt,
+      worker.finishedAt,
+    ]));
+    if (signature === renderedWorkersSignature) return;
+    renderedWorkersSignature = signature;
+    $("#worker-list").innerHTML = state.workers.map((worker, index) => {
       const profile = worker.profile ? worker.profile.toUpperCase() : "NONE";
       return `
-        <article class="worker-card ${escapeHtml(worker.status)}${worker.enabled ? "" : " disabled"}">
+        <button type="button" class="worker-card ${escapeHtml(worker.status)}${worker.enabled ? "" : " disabled"}" data-worker-index="${index}" aria-label="${escapeHtml(worker.name)} 진행상황 보기" ${worker.enabled ? "" : "disabled"}>
           <div class="worker-head">
             <div class="worker-name"><i class="worker-dot"></i>${escapeHtml(worker.name)}</div>
             <span class="worker-status">${escapeHtml(worker.status)}</span>
           </div>
           <div class="worker-task"><strong>${escapeHtml(worker.challengeName || (worker.enabled ? "Job 대기 중" : "Concurrency 제한"))}</strong><span>${escapeHtml(worker.phase)}</span></div>
-          <div class="mini-track"><i style="width:${Number(worker.progress) || 0}%"></i></div>
-          <div class="worker-meta"><span class="profile-badge">${profile}</span><span>DONE ${Number(worker.completed) || 0}</span></div>
-        </article>`;
+          <div class="worker-divider" aria-hidden="true"></div>
+          <div class="worker-meta"><span class="profile-badge">${profile}</span><span>DONE ${Number(worker.completed) || 0} · 진행 보기 ↗</span></div>
+        </button>`;
     }).join("");
+  }
+
+  function selectedWorker() {
+    if (!state || selectedWorkerIndex == null) return null;
+    return state.workers[selectedWorkerIndex] || null;
+  }
+
+  function renderWorkerDialog() {
+    const worker = selectedWorker();
+    if (!worker) return;
+    const challenge = challengeForWorker(worker);
+    const observation = workerObservations.get(String(selectedWorkerIndex)) || {};
+    const tokens = tokensForWorker(worker);
+    const phase = challenge && challenge.phase ? challenge.phase : (worker.phase || "대기 중");
+
+    $("#worker-dialog-title").textContent = worker.name;
+    $("#worker-dialog-subtitle").textContent = worker.challengeName || "아직 배정된 문제가 없습니다.";
+    $("#worker-detail-model").textContent = modelForWorker(worker);
+    $("#worker-detail-challenge").textContent = worker.challengeName || "대기 중";
+    $("#worker-detail-tokens").textContent = tokens;
+    $("#worker-detail-duration").textContent = formatDuration(observation.startedAt, observation.finishedAt);
+    $("#worker-detail-phase").textContent = phase;
+    $("#worker-detail-status").textContent = statusLabels[worker.status] || worker.status || "대기";
+    $("#worker-detail-status").className = `worker-detail-status ${escapeHtml(worker.status || "idle")}`;
+
+    $("#worker-log-button").classList.add("hidden");
+    $("#worker-inline-log").classList.remove("hidden");
+    renderInlineWorkerLogs();
+  }
+
+  function renderInlineWorkerLogs() {
+    const entries = workerLogs.get(String(selectedWorkerIndex)) || [];
+    const output = $("#worker-inline-log-output");
+    output.innerHTML = entries.length ? entries.slice(-40).map((entry) => `
+      <div class="worker-inline-log-entry ${escapeHtml(entry.level)}">
+        <div><time>${escapeHtml(formatClock(entry.time))}</time><strong>${escapeHtml(entry.type)}</strong></div>
+        <p>${escapeHtml(entry.message)}</p>
+      </div>`).join("") : '<div class="worker-inline-log-empty">아직 Worker 로그가 없습니다.</div>';
+    output.scrollTop = output.scrollHeight;
+  }
+
+  function renderWorkerLogs(scrollToEnd) {
+    const worker = selectedWorker();
+    if (!worker) return;
+    const entries = workerLogs.get(String(selectedWorkerIndex)) || [];
+    $("#worker-log-title").textContent = `${worker.name} 로그`;
+    $("#worker-log-path").textContent = `worker://${worker.name.toLowerCase().replace(/\s+/g, "-")}/${worker.challengeName || "idle"}`;
+    $("#worker-log-output").innerHTML = entries.length ? entries.map((entry) => `
+      <div class="worker-log-row ${escapeHtml(entry.level)}">
+        <time class="worker-log-time">${escapeHtml(formatClock(entry.time))}</time>
+        <span class="worker-log-type">${escapeHtml(entry.type)}</span>
+        <p class="worker-log-message">${escapeHtml(entry.message)}</p>
+      </div>`).join("") : '<div class="worker-log-empty">아직 관찰된 Worker 로그가 없습니다.</div>';
+    if (scrollToEnd) $("#worker-log-output").scrollTop = $("#worker-log-output").scrollHeight;
+  }
+
+  function openWorkerDialog(index) {
+    selectedWorkerIndex = index;
+    renderWorkerDialog();
+    if (!$("#worker-dialog").open) $("#worker-dialog").showModal();
   }
 
   function renderChallenges() {
@@ -173,7 +465,11 @@
   function setBusy(button, busy, text) {
     if (!button.dataset.originalText) button.dataset.originalText = button.textContent.trim();
     button.disabled = busy;
-    if (text) button.textContent = text;
+    if (text) {
+      const label = button.querySelector("span:last-child");
+      if (label) label.textContent = text;
+      else button.textContent = text;
+    }
     if (!busy && button.dataset.originalText) {
       if (button.id === "connect-button") button.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 12h11m0 0-4-4m4 4-4 4M20 5v14"></path></svg><span>문제 불러오기</span>';
       else if (button.id === "run-button") button.innerHTML = '<span class="play-icon" aria-hidden="true"></span><span>자동 풀이 시작</span>';
@@ -198,6 +494,7 @@
     polling = true;
     try {
       state = await api("/api/state");
+      await pollWorkerEvents();
       render();
     } catch {
       $("#system-pill").className = "system-pill";
@@ -214,6 +511,22 @@
   }));
   $("#auto-submit-flags").addEventListener("change", (event) => {
     autoSubmitFlags = selectedMode === "ctfd" && event.target.checked;
+  });
+  $("#worker-list").addEventListener("click", (event) => {
+    const card = event.target.closest("[data-worker-index]");
+    if (!card || card.disabled) return;
+    openWorkerDialog(Number(card.dataset.workerIndex));
+  });
+  $("#worker-dialog-close").addEventListener("click", () => $("#worker-dialog").close());
+  $("#worker-log-button").addEventListener("click", () => {
+    renderWorkerLogs(true);
+    if (!$("#worker-log-dialog").open) $("#worker-log-dialog").showModal();
+  });
+  $("#worker-log-close").addEventListener("click", () => $("#worker-log-dialog").close());
+  [$("#worker-dialog"), $("#worker-log-dialog")].forEach((dialog) => {
+    dialog.addEventListener("click", (event) => {
+      if (event.target === dialog) dialog.close();
+    });
   });
   $$("[data-filter]").forEach((button) => button.addEventListener("click", () => {
     challengeFilter = button.dataset.filter;

@@ -3,8 +3,15 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from ctf_harness.app import build_codex_harness
+from ctf_harness.app import CodexHarness, build_codex_harness
+from ctf_harness.domain import Challenge
+from ctf_harness.events import EventBus
+from ctf_harness.main_agent import MainAgentRuntime
 from ctf_harness.platforms import CTFdPlatformAdapter, MemoryPlatformAdapter
+from ctf_harness.scheduler import LocalWorkerScheduler
+from ctf_harness.storage import LocalObjectStore, MemoryRunRepository
+from ctf_harness.worker import DemoWorkerRunner
+from ctf_harness.workflows import CtfRunWorkflow
 
 
 class HarnessWiringTests(unittest.TestCase):
@@ -57,6 +64,114 @@ class HarnessWiringTests(unittest.TestCase):
             controller = DashboardController(Path(tmp))
             try:
                 self.assertNotIn("events", controller.public_state())
+            finally:
+                controller.shutdown()
+
+    def test_dashboard_exposes_incremental_worker_event_stream(self):
+        from ctf_harness.dashboard import DashboardController
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            controller = DashboardController(root)
+            try:
+                platform = MemoryPlatformAdapter([])
+                repository = MemoryRunRepository()
+                events = EventBus()
+                scheduler = LocalWorkerScheduler(DemoWorkerRunner, max_workers=1)
+                workflow = CtfRunWorkflow(
+                    platform,
+                    scheduler,
+                    repository,
+                    LocalObjectStore(root),
+                    events,
+                    main=MainAgentRuntime(repository, events),
+                )
+                controller.harness = CodexHarness(workflow, scheduler, repository, events)
+                controller.run_id = "run-events"
+                controller._submit(events.publish(
+                    "worker.heartbeat",
+                    run_id="run-events",
+                    worker_id="run-events-one",
+                    worker_number=1,
+                    summary="still working",
+                ))
+
+                first = controller.event_batch(0)
+                self.assertEqual(first["runId"], "run-events")
+                self.assertEqual(first["events"][0]["type"], "worker.heartbeat")
+                self.assertEqual(first["events"][0]["payload"]["worker_number"], 1)
+                self.assertEqual(first["nextCursor"], 1)
+                self.assertEqual(controller.event_batch(first["nextCursor"])["events"], [])
+
+                javascript = (
+                    Path(__file__).resolve().parents[1] / "src/ctf_harness/console/app.js"
+                ).read_text(encoding="utf-8")
+                self.assertIn('/api/events?cursor=', javascript)
+                self.assertIn('case "worker.token_usage"', javascript)
+                self.assertIn('case "worker.tool"', javascript)
+            finally:
+                controller.shutdown()
+
+    def test_dashboard_tracks_reused_slot_done_count_current_problem_and_tokens(self):
+        from ctf_harness.dashboard import DashboardController
+
+        challenges = [
+            Challenge("one", "First Problem", "web", "first"),
+            Challenge("two", "Second Problem", "web", "second"),
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            controller = DashboardController(root)
+            try:
+                platform = MemoryPlatformAdapter(challenges)
+                repository = MemoryRunRepository()
+                events = EventBus()
+                scheduler = LocalWorkerScheduler(DemoWorkerRunner, max_workers=1)
+                workflow = CtfRunWorkflow(
+                    platform,
+                    scheduler,
+                    repository,
+                    LocalObjectStore(root),
+                    events,
+                    main=MainAgentRuntime(repository, events),
+                    worker_model="gpt-5.4-mini",
+                )
+                controller.platform = platform
+                controller.challenges = challenges
+                controller.worker_limit = 1
+                controller.run_id = "run-slots"
+                controller.harness = CodexHarness(workflow, scheduler, repository, events)
+                controller._submit(workflow.run(controller.run_id))
+                controller._submit(events.publish(
+                    "worker.token_usage",
+                    run_id=controller.run_id,
+                    worker_id="run-slots-two",
+                    worker_number=1,
+                    usage={
+                        "total": {
+                            "totalTokens": 1234,
+                            "inputTokens": 900,
+                            "cachedInputTokens": 100,
+                            "outputTokens": 334,
+                            "reasoningOutputTokens": 50,
+                        },
+                        "modelContextWindow": 200000,
+                    },
+                ))
+
+                state = controller.public_state()
+                worker = state["workers"][0]
+                self.assertEqual(worker["completed"], 2)
+                self.assertEqual(worker["challengeName"], "Second Problem")
+                self.assertEqual(worker["status"], "completed")
+                self.assertEqual(worker["model"], "gpt-5.4-mini")
+                self.assertEqual(worker["tokenUsage"]["totalTokens"], 1234)
+                self.assertEqual(worker["tokenUsage"]["modelContextWindow"], 200000)
+                self.assertIsNotNone(worker["startedAt"])
+                self.assertIsNotNone(worker["finishedAt"])
+                second = next(item for item in state["challenges"] if item["id"] == "two")
+                self.assertEqual(second["workerId"], "Worker 1")
+                self.assertEqual(second["backendWorkerId"], "run-slots-two")
             finally:
                 controller.shutdown()
 

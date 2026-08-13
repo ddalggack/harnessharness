@@ -14,7 +14,7 @@
         <div class="brand">
           <div class="brand-mark" aria-hidden="true"><span>H</span><i></i></div>
           <div>
-            <p class="eyebrow">AUTHORIZED LOCAL CTF OPERATIONS</p>
+            <p class="eyebrow">BOB 15 SPD CTF TOOL</p>
             <h1>HarneHarness</h1>
           </div>
         </div>
@@ -38,7 +38,7 @@
 
           <div class="segmented" role="group" aria-label="실행 모드">
             <button type="button" class="segment active" data-mode="demo">안전 Demo</button>
-            <button type="button" class="segment" data-mode="ctfd">로컬 CTFd</button>
+            <button type="button" class="segment" data-mode="ctfd">CTF</button>
           </div>
 
           <div id="ctfd-fields" class="conditional-fields hidden">
@@ -64,13 +64,13 @@
           </fieldset>
 
           <fieldset class="fieldset">
-            <legend>동시 Worker</legend>
-            <div class="counter-control" role="group" aria-label="동시 Worker 수">
+            <legend>Worker 규모</legend>
+            <div class="counter-control" role="group" aria-label="Worker 규모 선택">
               <button type="button" data-worker-limit="1">1</button>
               <button type="button" data-worker-limit="2">2</button>
               <button type="button" data-worker-limit="3" class="active">3</button>
             </div>
-            <p class="field-note">노트북 보호를 위해 최대 3개로 고정</p>
+            <p class="field-note">밥트북 보호를 위해 최대 3개로 고정</p>
           </fieldset>
 
           <div id="ctfd-options" class="option-stack hidden">
@@ -93,20 +93,16 @@
             <span>문제 불러오기</span>
           </button>
 
-          <div class="safety-note">
-            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 4.5 6v5.2c0 4.6 3.2 8.5 7.5 9.8 4.3-1.3 7.5-5.2 7.5-9.8V6L12 3Z" /><path d="m9 12 2 2 4-4" /></svg>
-            <p><strong>로컬 전용 안전장치</strong><br />공인 인터넷 CTF 주소는 API 단계에서 차단합니다.</p>
-          </div>
         </aside>
 
         <main class="main-console">
           <section class="launch-card" aria-labelledby="launch-title">
             <div class="launch-copy">
-              <span class="step-number inverted">02</span>
+              <span class="step-number">02</span>
               <div>
                 <p class="run-kicker" id="run-kicker">READY FOR CHECK</p>
-                <h2 id="launch-title">문제를 가져오고 Worker를 출발시키세요.</h2>
-                <p id="run-message">왼쪽에서 Demo 또는 로컬 CTFd 환경을 먼저 확인합니다.</p>
+                <h2 id="launch-title">문제를 불러온 뒤, 자동 풀이를 시작하세요.</h2>
+                <p id="run-message">좌측 사이드바에서 대상 CTF를 먼저 연결합니다.</p>
               </div>
             </div>
             <div class="launch-actions">
@@ -125,7 +121,6 @@
           <section class="metric-grid" aria-label="실행 요약">
             <article class="metric-card"><span>전체 문제</span><strong id="metric-total">0</strong><small>선택된 문제</small></article>
             <article class="metric-card"><span>정답 확인</span><strong id="metric-solved">0</strong><small>정답 승인 기준</small></article>
-            <article class="metric-card"><span>작업 중인 Worker</span><strong id="metric-workers">0/3</strong><small>최대 3개</small></article>
             <article class="metric-card"><span>진행률</span><strong id="metric-progress">0%</strong><small id="metric-status">IDLE</small></article>
           </section>
 
@@ -165,6 +160,62 @@
         </main>
       </div>
     </div>
+
+    <dialog id="worker-dialog" class="worker-dialog" aria-labelledby="worker-dialog-title">
+      <div class="worker-dialog-shell">
+        <header class="worker-dialog-head">
+          <div>
+            <span class="worker-dialog-kicker">WORKER LIVE STATUS</span>
+            <h2 id="worker-dialog-title">Worker</h2>
+            <p id="worker-dialog-subtitle">선택한 Worker의 현재 실행 정보를 표시합니다.</p>
+          </div>
+          <button id="worker-dialog-close" type="button" aria-label="Worker 진행상황 닫기">×</button>
+        </header>
+
+        <div class="worker-dialog-body">
+          <section class="worker-detail-panel" aria-label="Worker 실행 정보">
+            <dl class="worker-detail-grid">
+              <div><dt>model</dt><dd id="worker-detail-model">—</dd></div>
+              <div><dt>challenge</dt><dd id="worker-detail-challenge">—</dd></div>
+              <div><dt>current token usage</dt><dd id="worker-detail-tokens">수집 안 됨</dd></div>
+              <div><dt>working time</dt><dd id="worker-detail-duration">00:00</dd></div>
+              <div><dt>phase</dt><dd id="worker-detail-phase">대기 중</dd></div>
+              <div><dt>status</dt><dd><span id="worker-detail-status" class="worker-detail-status">IDLE</span></dd></div>
+            </dl>
+          </section>
+
+          <button id="worker-log-button" class="worker-log-launch hidden" type="button">
+            <span class="worker-log-launch-icon" aria-hidden="true">›_</span>
+            <strong>로그 보기</strong>
+            <i aria-hidden="true">→</i>
+          </button>
+
+          <section id="worker-inline-log" class="worker-inline-log hidden" aria-label="Worker 실시간 로그">
+            <div class="worker-inline-log-head" aria-hidden="true">
+              <span><i></i><i></i><i></i></span>
+              <strong>LIVE LOG</strong>
+            </div>
+            <div id="worker-inline-log-output" class="worker-inline-log-output" aria-live="polite"></div>
+          </section>
+        </div>
+      </div>
+    </dialog>
+
+    <dialog id="worker-log-dialog" class="worker-log-dialog" aria-labelledby="worker-log-title">
+      <div class="worker-log-shell">
+        <header class="worker-log-head">
+          <div>
+            <span>LIVE WORKER LOG</span>
+            <h2 id="worker-log-title">Worker 로그</h2>
+          </div>
+          <button id="worker-log-close" type="button" aria-label="Worker 로그 닫기">×</button>
+        </header>
+        <div class="worker-terminal-bar" aria-hidden="true">
+          <i></i><i></i><i></i><span id="worker-log-path">worker://waiting</span>
+        </div>
+        <div id="worker-log-output" class="worker-log-output" aria-live="polite"></div>
+      </div>
+    </dialog>
 
     <div id="toast" class="toast" role="status" aria-live="polite"></div>
     <script src="/app.js" defer></script>

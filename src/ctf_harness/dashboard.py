@@ -9,7 +9,7 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
-from urllib.parse import unquote, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 from ctf_harness.app import CodexHarness, build_codex_harness
 from ctf_harness.domain import Challenge
@@ -190,49 +190,192 @@ class DashboardController:
         )
         return self.public_state()
 
-    def _worker_rows(self) -> list[dict[str, Any]]:
-        records = list(self.harness.repository.workers.values()) if self.harness else []
-        rows = []
-        for index in range(3):
-            if index < len(records):
-                record = records[index]
-                challenge = next((c for c in self.challenges if c.id == record.challenge_id), None)
+    @staticmethod
+    def _compact(value: Any, limit: int = 120) -> str:
+        if value is None:
+            return ""
+        if isinstance(value, str):
+            text = " ".join(value.split())
+        else:
+            try:
+                text = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+            except (TypeError, ValueError):
+                text = str(value)
+        return text if len(text) <= limit else f"{text[: limit - 1]}…"
+
+    @staticmethod
+    def _number(value: Any) -> int | None:
+        return int(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else None
+
+    @classmethod
+    def _normalize_token_usage(cls, usage: Any) -> dict[str, int] | None:
+        if isinstance(usage, (int, float)) and not isinstance(usage, bool):
+            return {"totalTokens": max(0, int(usage))}
+        if not isinstance(usage, dict):
+            return None
+
+        total = usage.get("total")
+        source = total if isinstance(total, dict) else usage
+
+        def pick(*names: str) -> int | None:
+            for container in (source, usage):
+                for name in names:
+                    number = cls._number(container.get(name))
+                    if number is not None:
+                        return max(0, number)
+            return None
+
+        normalized = {
+            "totalTokens": pick("totalTokens", "total_tokens"),
+            "inputTokens": pick("inputTokens", "input_tokens"),
+            "cachedInputTokens": pick("cachedInputTokens", "cached_input_tokens"),
+            "outputTokens": pick("outputTokens", "output_tokens"),
+            "reasoningOutputTokens": pick(
+                "reasoningOutputTokens", "reasoning_output_tokens"
+            ),
+            "modelContextWindow": pick("modelContextWindow", "model_context_window"),
+        }
+        return {key: value for key, value in normalized.items() if value is not None} or None
+
+    @classmethod
+    def _event_phase(cls, event_type: str, payload: dict[str, Any]) -> str | None:
+        if event_type == "worker.started":
+            return "Worker 시작"
+        if event_type == "worker.turn_started":
+            return f"Turn {payload.get('turn', 1)} 분석 중"
+        if event_type == "worker.turn_completed":
+            return f"Turn {payload.get('turn', 1)} 완료"
+        if event_type == "worker.heartbeat":
+            return cls._compact(payload.get("summary")) or "작업 중"
+        if event_type == "worker.reasoning":
+            return cls._compact(payload.get("summary")) or "추론 중"
+        if event_type == "worker.tool":
+            tool = cls._compact(payload.get("tool")) or "도구"
+            return f"{tool} {'완료' if payload.get('status') == 'completed' else '실행 중'}"
+        if event_type == "worker.file_change":
+            return "파일 변경"
+        if event_type == "worker.message":
+            return "응답 작성 중"
+        if event_type == "worker.reported":
+            return str(payload.get("kind") or "보고 완료")
+        if event_type == "worker.terminated":
+            return "중지"
+        if event_type.startswith("submission."):
+            return cls._compact(payload.get("summary")) or event_type.split(".", 1)[1]
+        return None
+
+    def _worker_event_index(
+        self, events: list[Any]
+    ) -> tuple[dict[str, int], dict[str, dict[str, Any]]]:
+        slot_by_worker: dict[str, int] = {}
+        metadata: dict[str, dict[str, Any]] = {}
+        for order, event in enumerate(events):
+            payload = event.payload
+            worker_id = str(payload.get("worker_id") or "")
+            if not worker_id:
+                continue
+            slot = self._number(payload.get("worker_number"))
+            if slot is not None and 1 <= slot <= 3:
+                slot_by_worker[worker_id] = slot
+            item = metadata.setdefault(worker_id, {"order": order})
+            item["order"] = order
+            if event.type == "worker.started":
+                item.setdefault("startedAt", event.occurred_at)
+            if event.type == "worker.token_usage":
+                normalized = self._normalize_token_usage(payload.get("usage"))
+                if normalized is not None:
+                    item["tokenUsage"] = normalized
+            phase = self._event_phase(event.type, payload)
+            if phase:
+                item["phase"] = phase
+            if event.type == "worker.reported" and payload.get("kind") in {"completed", "failed"}:
+                item["finishedAt"] = event.occurred_at
+            elif event.type == "worker.terminated":
+                item["finishedAt"] = event.occurred_at
+        return slot_by_worker, metadata
+
+    def _worker_rows(
+        self, records: list[Any], events: list[Any]
+    ) -> tuple[list[dict[str, Any]], dict[str, int]]:
+        slot_by_worker, metadata = self._worker_event_index(events)
+        used_slots = set(slot_by_worker.values())
+        for record in records:
+            if record.worker_id in slot_by_worker:
+                continue
+            slot = next((candidate for candidate in range(1, 4) if candidate not in used_slots), None)
+            if slot is None:
+                slot = 1 + min(
+                    range(3),
+                    key=lambda index: sum(value == index + 1 for value in slot_by_worker.values()),
+                )
+            slot_by_worker[record.worker_id] = slot
+            used_slots.add(slot)
+
+        rows: list[dict[str, Any]] = []
+        for slot in range(1, 4):
+            assigned = [record for record in records if slot_by_worker.get(record.worker_id) == slot]
+            completed = sum(record.status.value == "completed" for record in assigned)
+            active = [record for record in assigned if record.status.value in {"created", "running"}]
+            candidates = active or assigned
+            current = max(
+                candidates,
+                key=lambda record: metadata.get(record.worker_id, {}).get("order", -1),
+                default=None,
+            )
+            if current is None:
                 rows.append({
-                    "name": f"Worker {index + 1}",
-                    "enabled": index < self.worker_limit,
-                    "status": record.status.value,
-                    "challengeName": challenge.title if challenge else record.challenge_id,
-                    "profile": record.profile.name,
-                    "phase": record.reports[-1].kind.value if record.reports else "assigned",
-                    "progress": 100 if record.status.value in {"completed", "failed", "terminated"} else 50,
-                    "completed": int(record.status.value == "completed"),
-                })
-            else:
-                rows.append({
-                    "name": f"Worker {index + 1}",
-                    "enabled": index < self.worker_limit,
+                    "workerId": None,
+                    "name": f"Worker {slot}",
+                    "enabled": slot <= self.worker_limit,
                     "status": "idle",
                     "challengeName": "",
                     "profile": "",
-                    "phase": "대기 중" if index < self.worker_limit else "Concurrency 제한",
+                    "model": "",
+                    "phase": "대기 중" if slot <= self.worker_limit else "Concurrency 제한",
                     "progress": 0,
-                    "completed": 0,
+                    "completed": completed,
+                    "tokenUsage": None,
+                    "startedAt": None,
+                    "finishedAt": None,
                 })
-        return rows
+                continue
 
-    def _challenge_rows(self) -> list[dict[str, Any]]:
-        by_challenge = {
-            record.challenge_id: record
-            for record in (self.harness.repository.workers.values() if self.harness else [])
-        }
+            challenge = next((item for item in self.challenges if item.id == current.challenge_id), None)
+            current_metadata = metadata.get(current.worker_id, {})
+            status = current.status.value
+            report_phase = current.reports[-1].kind.value if current.reports else "assigned"
+            rows.append({
+                "workerId": current.worker_id,
+                "name": f"Worker {slot}",
+                "enabled": slot <= self.worker_limit,
+                "status": status,
+                "challengeName": challenge.title if challenge else current.challenge_id,
+                "profile": current.profile.name,
+                "model": current.model,
+                "phase": current_metadata.get("phase", report_phase),
+                "progress": 100 if status in {"completed", "failed", "terminated"} else 50,
+                "completed": completed,
+                "tokenUsage": current_metadata.get("tokenUsage"),
+                "startedAt": current_metadata.get("startedAt"),
+                "finishedAt": current_metadata.get("finishedAt"),
+            })
+        return rows, slot_by_worker
+
+    def _challenge_rows(
+        self, records: list[Any], slot_by_worker: dict[str, int]
+    ) -> list[dict[str, Any]]:
+        by_challenge = {record.challenge_id: record for record in records}
         rows = []
         for challenge in self.challenges:
             record = by_challenge.get(challenge.id)
             status = "queued"
             phase = "실행 대기"
             worker_id = None
+            backend_worker_id = None
             if record is not None:
-                worker_id = record.worker_id
+                backend_worker_id = record.worker_id
+                slot = slot_by_worker.get(record.worker_id)
+                worker_id = f"Worker {slot}" if slot is not None else record.worker_id
                 status = record.status.value
                 phase = record.reports[-1].summary if record.reports else "Worker 시작"
             rows.append({
@@ -241,10 +384,34 @@ class DashboardController:
                 "category": challenge.category.lower(),
                 "points": 0,
                 "workerId": worker_id,
+                "backendWorkerId": backend_worker_id,
                 "status": status,
                 "phase": phase,
             })
         return rows
+
+    def event_batch(self, cursor: int, limit: int = 200) -> dict[str, Any]:
+        if cursor < 0:
+            raise ValueError("event cursor는 0 이상이어야 합니다.")
+        history = list(self.harness.events.history) if self.harness else []
+        if cursor > len(history):
+            cursor = 0
+        selected = history[cursor : cursor + max(1, min(limit, 500))]
+        return {
+            "runId": self.run_id,
+            "cursor": cursor,
+            "nextCursor": cursor + len(selected),
+            "hasMore": cursor + len(selected) < len(history),
+            "events": [
+                {
+                    "sequence": cursor + index + 1,
+                    "type": event.type,
+                    "occurredAt": event.occurred_at,
+                    "payload": event.payload,
+                }
+                for index, event in enumerate(selected)
+            ],
+        }
 
     def public_state(self) -> dict[str, Any]:
         running = self.run_future is not None and not self.run_future.done()
@@ -268,7 +435,10 @@ class DashboardController:
             else:
                 status, message = "completed", "모든 Worker 실행이 끝났습니다."
 
-        challenge_rows = self._challenge_rows()
+        records = list(self.harness.repository.workers.values()) if self.harness else []
+        events = list(self.harness.events.history) if self.harness else []
+        worker_rows, slot_by_worker = self._worker_rows(records, events)
+        challenge_rows = self._challenge_rows(records, slot_by_worker)
         terminal = sum(item["status"] in {"completed", "failed", "terminated"} for item in challenge_rows)
         completed = sum(item["status"] == "completed" for item in challenge_rows)
         total = len(challenge_rows)
@@ -289,7 +459,7 @@ class DashboardController:
                 "solved": completed,
                 "progress": progress,
             },
-            "workers": self._worker_rows(),
+            "workers": worker_rows,
             "challenges": challenge_rows,
         }
 
@@ -324,12 +494,22 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
         return value
 
     def do_GET(self) -> None:
-        path = urlparse(self.path).path
+        parsed = urlparse(self.path)
+        path = parsed.path
         if path == "/api/health":
             self._json(HTTPStatus.OK, {"ok": True})
             return
         if path == "/api/state":
             self._json(HTTPStatus.OK, self.controller.public_state())
+            return
+        if path == "/api/events":
+            try:
+                cursor = int(parse_qs(parsed.query).get("cursor", ["0"])[0])
+                value = self.controller.event_batch(cursor)
+            except (TypeError, ValueError) as exc:
+                self._json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+            else:
+                self._json(HTTPStatus.OK, value)
             return
         relative = "index.html" if path == "/" else unquote(path.lstrip("/"))
         target = (_CONSOLE_ROOT / relative).resolve()
