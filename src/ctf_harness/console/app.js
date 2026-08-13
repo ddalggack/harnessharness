@@ -12,6 +12,8 @@
   let toastTimer = null;
   let selectedWorkerIndex = null;
   let observedRunId;
+  let eventRunId = null;
+  let eventCursor = 0;
   let renderedWorkersSignature = null;
   const workerObservations = new Map();
   const workerLogs = new Map();
@@ -43,7 +45,12 @@
 
   function formatDuration(startedAt, finishedAt) {
     if (!startedAt) return "00:00";
-    const totalSeconds = Math.max(0, Math.floor(((finishedAt || Date.now()) - startedAt) / 1000));
+    const started = typeof startedAt === "number" ? startedAt : Date.parse(startedAt);
+    const finished = finishedAt
+      ? (typeof finishedAt === "number" ? finishedAt : Date.parse(finishedAt))
+      : Date.now();
+    if (!Number.isFinite(started) || !Number.isFinite(finished)) return "00:00";
+    const totalSeconds = Math.max(0, Math.floor((finished - started) / 1000));
     const hours = Math.floor(totalSeconds / 3600);
     const minutes = Math.floor((totalSeconds % 3600) / 60);
     const seconds = totalSeconds % 60;
@@ -68,7 +75,11 @@
       return `${Math.max(0, usage).toLocaleString("ko-KR")} tokens`;
     }
     if (usage && typeof usage === "object") {
-      const total = usage.total_tokens ?? usage.totalTokens ?? usage.total;
+      const nestedTotal = usage.total && typeof usage.total === "object" ? usage.total : null;
+      const total = usage.total_tokens
+        ?? usage.totalTokens
+        ?? (nestedTotal && (nestedTotal.total_tokens ?? nestedTotal.totalTokens))
+        ?? (typeof usage.total === "number" ? usage.total : null);
       if (typeof total === "number" && Number.isFinite(total)) {
         return `${Math.max(0, total).toLocaleString("ko-KR")} tokens`;
       }
@@ -84,6 +95,135 @@
     return "info";
   }
 
+  function compactLogValue(value, limit) {
+    if (value == null || value === "") return "";
+    let text;
+    if (typeof value === "string") text = value;
+    else {
+      try { text = JSON.stringify(value); }
+      catch { text = String(value); }
+    }
+    text = text.replace(/\s+/g, " ").trim();
+    const max = limit || 360;
+    return text.length <= max ? text : `${text.slice(0, max - 1)}…`;
+  }
+
+  function eventWorkerIndex(payload) {
+    const number = Number(payload && (payload.worker_number ?? payload.workerNumber));
+    if (Number.isInteger(number) && number >= 1 && number <= 3) return number - 1;
+    if (!state || !payload || !payload.worker_id) return -1;
+    return state.workers.findIndex((worker) => worker.workerId === payload.worker_id);
+  }
+
+  function eventLogEntry(event) {
+    const payload = event.payload || {};
+    const status = payload.status || "";
+    const challenge = payload.challenge_title || payload.challenge_id || "";
+    const elapsed = Number(payload.elapsed_s);
+    const elapsedText = Number.isFinite(elapsed) ? ` · ${elapsed.toFixed(1)}초` : "";
+    const tool = compactLogValue(payload.tool) || "도구";
+    const finished = status === "completed";
+    const detail = compactLogValue(
+      payload.command
+      ?? payload.query
+      ?? payload.arguments
+      ?? payload.output
+      ?? payload.result
+      ?? payload.changes
+      ?? payload.content
+      ?? payload.summary
+      ?? payload.intent
+    );
+
+    switch (event.type) {
+      case "worker.started":
+        return { type: "시작", message: `${challenge || "문제"} · Worker 시작`, level: "info" };
+      case "worker.turn_started":
+        return { type: "분석", message: `Turn ${payload.turn || 1} 시작`, level: "info" };
+      case "worker.turn_completed":
+        return { type: "분석", message: `Turn ${payload.turn || 1} 완료${elapsedText}`, level: "success" };
+      case "worker.heartbeat":
+        return { type: "작업 중", message: detail || `Worker 실행 중${elapsedText}`, level: "info" };
+      case "worker.reasoning":
+        return { type: "추론", message: detail || "추론 진행 중", level: "info" };
+      case "worker.tool": {
+        const exitCode = payload.exit_code ?? payload.exitCode;
+        const exitText = exitCode == null ? "" : ` · exit ${exitCode}`;
+        return {
+          type: tool,
+          message: `${finished ? "완료" : "실행"}${exitText}${detail ? ` · ${detail}` : ""}`,
+          level: payload.error || (exitCode != null && Number(exitCode) !== 0) ? "error" : (finished ? "success" : "info"),
+        };
+      }
+      case "worker.file_change":
+        return { type: "파일 변경", message: detail || "Worker가 파일을 수정했습니다.", level: "info" };
+      case "worker.message":
+        return { type: "메시지", message: detail || `${payload.role || "assistant"} 메시지`, level: "info" };
+      case "worker.token_usage":
+        return { type: "토큰", message: tokensForWorker({ tokenUsage: payload.usage }), level: "info" };
+      case "worker.reported":
+        return {
+          type: String(payload.kind || "보고"),
+          message: compactLogValue(payload.summary) || "Worker 보고 수신",
+          level: logLevelForStatus(payload.kind),
+        };
+      case "worker.terminated":
+        return { type: "중지", message: "Worker 실행 중지", level: "warning" };
+      default:
+        if (event.type.startsWith("submission.")) {
+          const result = event.type.split(".", 2)[1];
+          const failed = ["rejected", "error", "wrong_limit"].includes(result);
+          return {
+            type: "플래그 제출",
+            message: compactLogValue(payload.summary) || result,
+            level: result === "accepted" ? "success" : (failed ? "error" : "warning"),
+          };
+        }
+        return null;
+    }
+  }
+
+  function ingestWorkerEvents(events) {
+    (events || []).forEach((event) => {
+      const index = eventWorkerIndex(event.payload || {});
+      const entry = eventLogEntry(event);
+      if (index < 0 || !entry) return;
+      const key = String(index);
+      const entries = workerLogs.get(key) || [];
+      entries.push({ ...entry, time: event.occurredAt || Date.now() });
+      workerLogs.set(key, entries.slice(-160));
+    });
+  }
+
+  async function pollWorkerEvents() {
+    if (!state || !state.run.id) {
+      if (eventRunId !== null) {
+        eventRunId = null;
+        eventCursor = 0;
+        workerLogs.clear();
+      }
+      return;
+    }
+    if (state.run.id !== eventRunId) {
+      eventRunId = state.run.id;
+      eventCursor = 0;
+      workerLogs.clear();
+    }
+    let hasMore = true;
+    while (hasMore) {
+      const batch = await api(`/api/events?cursor=${eventCursor}`);
+      if (batch.runId !== state.run.id) {
+        eventRunId = batch.runId || null;
+        eventCursor = 0;
+        workerLogs.clear();
+        return;
+      }
+      ingestWorkerEvents(batch.events);
+      eventCursor = Number(batch.nextCursor) || eventCursor;
+      hasMore = Boolean(batch.hasMore);
+    }
+  }
+
   function observeWorkers() {
     if (!state) return;
     const runId = state.run.id || null;
@@ -91,38 +231,16 @@
       observedRunId = runId;
       renderedWorkersSignature = null;
       workerObservations.clear();
-      workerLogs.clear();
     }
 
     state.workers.forEach((worker, index) => {
       const key = String(index);
-      const challenge = challengeForWorker(worker);
-      const phase = challenge && challenge.phase ? challenge.phase : worker.phase;
       const observation = workerObservations.get(key) || {
-        signature: null,
         startedAt: null,
         finishedAt: null,
       };
-      const active = worker.status === "running" || worker.status === "created";
-      const terminal = ["completed", "failed", "terminated", "solved"].includes(worker.status);
-
-      if (active && !observation.startedAt) observation.startedAt = Date.now();
-      if (terminal && !observation.startedAt) observation.startedAt = Date.now();
-      if (terminal && !observation.finishedAt) observation.finishedAt = Date.now();
-
-      const signature = [worker.status, worker.challengeName, phase, worker.progress].join("|");
-      if (signature !== observation.signature) {
-        const entries = workerLogs.get(key) || [];
-        const task = worker.challengeName || "할당된 문제 없음";
-        entries.push({
-          time: Date.now(),
-          type: statusLabels[worker.status] || worker.status || "상태",
-          message: `${task} · ${phase || "상태 갱신"}`,
-          level: logLevelForStatus(worker.status),
-        });
-        workerLogs.set(key, entries.slice(-160));
-        observation.signature = signature;
-      }
+      observation.startedAt = worker.startedAt || observation.startedAt;
+      observation.finishedAt = worker.finishedAt || null;
       workerObservations.set(key, observation);
     });
   }
@@ -190,6 +308,9 @@
       worker.phase,
       worker.progress,
       worker.completed,
+      worker.tokenUsage,
+      worker.startedAt,
+      worker.finishedAt,
     ]));
     if (signature === renderedWorkersSignature) return;
     renderedWorkersSignature = signature;
@@ -239,7 +360,7 @@
   function renderInlineWorkerLogs() {
     const entries = workerLogs.get(String(selectedWorkerIndex)) || [];
     const output = $("#worker-inline-log-output");
-    output.innerHTML = entries.length ? entries.slice(-4).map((entry) => `
+    output.innerHTML = entries.length ? entries.slice(-40).map((entry) => `
       <div class="worker-inline-log-entry ${escapeHtml(entry.level)}">
         <div><time>${escapeHtml(formatClock(entry.time))}</time><strong>${escapeHtml(entry.type)}</strong></div>
         <p>${escapeHtml(entry.message)}</p>
@@ -373,6 +494,7 @@
     polling = true;
     try {
       state = await api("/api/state");
+      await pollWorkerEvents();
       render();
     } catch {
       $("#system-pill").className = "system-pill";
