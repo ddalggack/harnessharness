@@ -73,6 +73,17 @@
             <p class="field-note">밥트북 보호를 위해 최대 3개로 고정</p>
           </fieldset>
 
+          <label class="field model-field">
+            <span>Worker 모델</span>
+            <input id="worker-model" type="text" value="gpt-5.4" list="worker-model-options" autocomplete="off" spellcheck="false" />
+            <datalist id="worker-model-options">
+              <option value="gpt-5.4"></option>
+              <option value="gpt-5.4-mini"></option>
+              <option value="gpt-5.5"></option>
+            </datalist>
+            <small>추천 모델을 선택하거나 사용할 Codex 모델 ID를 직접 입력</small>
+          </label>
+
           <div id="ctfd-options" class="option-stack hidden">
             <label class="authorization-check">
               <input id="authorized" type="checkbox" />
