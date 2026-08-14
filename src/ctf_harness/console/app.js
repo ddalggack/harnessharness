@@ -16,6 +16,7 @@
   let eventRunId = null;
   let eventCursor = 0;
   let renderedWorkersSignature = null;
+  let confirmResolver = null;
   const workerObservations = new Map();
   const workerLogs = new Map();
 
@@ -38,6 +39,144 @@
       .replace(/>/g, "&gt;")
       .replace(/"/g, "&quot;")
       .replace(/'/g, "&#039;");
+  }
+
+  function renderInlineMarkdown(value) {
+    const codeSpans = [];
+    const links = [];
+    let text = escapeHtml(value).replace(/`([^`]+)`/g, (_, code) => {
+      const token = `\u0000CODE${codeSpans.length}\u0000`;
+      codeSpans.push(`<code>${code}</code>`);
+      return token;
+    });
+    text = text.replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, (_, label, url) => {
+      const token = `\u0000LINK${links.length}\u0000`;
+      links.push(`<a href="${url}" target="_blank" rel="noopener noreferrer">${label}</a>`);
+      return token;
+    });
+    text = text.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
+    text = text.replace(/__([^_]+)__/g, "<strong>$1</strong>");
+    text = text.replace(/\*([^*\n]+)\*/g, "<em>$1</em>");
+    text = text.replace(/~~([^~]+)~~/g, "<del>$1</del>");
+    return text
+      .replace(/\u0000CODE(\d+)\u0000/g, (_, index) => codeSpans[Number(index)])
+      .replace(/\u0000LINK(\d+)\u0000/g, (_, index) => links[Number(index)]);
+  }
+
+  function markdownCells(line) {
+    return line.trim().replace(/^\||\|$/g, "").split("|").map((cell) => cell.trim());
+  }
+
+  function renderMarkdown(value) {
+    const lines = String(value || "").replace(/\r\n?/g, "\n").split("\n");
+    const output = [];
+    let paragraph = [];
+    let listType = null;
+    let codeLanguage = null;
+    let codeLines = null;
+
+    function flushParagraph() {
+      if (!paragraph.length) return;
+      output.push(`<p>${renderInlineMarkdown(paragraph.join(" "))}</p>`);
+      paragraph = [];
+    }
+
+    function flushList() {
+      if (!listType) return;
+      output.push(`</${listType}>`);
+      listType = null;
+    }
+
+    for (let index = 0; index < lines.length; index += 1) {
+      const line = lines[index];
+      if (codeLines) {
+        if (/^\s*```/.test(line)) {
+          const languageClass = codeLanguage ? ` class="language-${codeLanguage}"` : "";
+          output.push(`<pre><code${languageClass}>${escapeHtml(codeLines.join("\n"))}</code></pre>`);
+          codeLines = null;
+          codeLanguage = null;
+        } else {
+          codeLines.push(line);
+        }
+        continue;
+      }
+
+      const fence = line.match(/^\s*```([A-Za-z0-9_+-]*)\s*$/);
+      if (fence) {
+        flushParagraph();
+        flushList();
+        codeLanguage = fence[1];
+        codeLines = [];
+        continue;
+      }
+      if (!line.trim()) {
+        flushParagraph();
+        flushList();
+        continue;
+      }
+
+      const nextLine = lines[index + 1] || "";
+      if (line.includes("|") && /^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$/.test(nextLine)) {
+        flushParagraph();
+        flushList();
+        const headers = markdownCells(line);
+        output.push(`<table><thead><tr>${headers.map((cell) => `<th>${renderInlineMarkdown(cell)}</th>`).join("")}</tr></thead><tbody>`);
+        index += 2;
+        while (index < lines.length && lines[index].includes("|") && lines[index].trim()) {
+          const cells = markdownCells(lines[index]);
+          output.push(`<tr>${headers.map((_, cellIndex) => `<td>${renderInlineMarkdown(cells[cellIndex] || "")}</td>`).join("")}</tr>`);
+          index += 1;
+        }
+        output.push("</tbody></table>");
+        index -= 1;
+        continue;
+      }
+
+      const heading = line.match(/^\s{0,3}(#{1,6})\s+(.+)$/);
+      if (heading) {
+        flushParagraph();
+        flushList();
+        const level = heading[1].length;
+        output.push(`<h${level}>${renderInlineMarkdown(heading[2])}</h${level}>`);
+        continue;
+      }
+      if (/^\s{0,3}([-*_])(?:\s*\1){2,}\s*$/.test(line)) {
+        flushParagraph();
+        flushList();
+        output.push("<hr>");
+        continue;
+      }
+      const quote = line.match(/^\s{0,3}>\s?(.*)$/);
+      if (quote) {
+        flushParagraph();
+        flushList();
+        output.push(`<blockquote>${renderInlineMarkdown(quote[1])}</blockquote>`);
+        continue;
+      }
+      const unordered = line.match(/^\s{0,3}[-+*]\s+(.+)$/);
+      const ordered = line.match(/^\s{0,3}\d+\.\s+(.+)$/);
+      if (unordered || ordered) {
+        flushParagraph();
+        const nextType = unordered ? "ul" : "ol";
+        if (listType !== nextType) {
+          flushList();
+          listType = nextType;
+          output.push(`<${listType}>`);
+        }
+        output.push(`<li>${renderInlineMarkdown((unordered || ordered)[1])}</li>`);
+        continue;
+      }
+      flushList();
+      paragraph.push(line.trim());
+    }
+
+    flushParagraph();
+    flushList();
+    if (codeLines) {
+      const languageClass = codeLanguage ? ` class="language-${codeLanguage}"` : "";
+      output.push(`<pre><code${languageClass}>${escapeHtml(codeLines.join("\n"))}</code></pre>`);
+    }
+    return output.join("\n");
   }
 
   function formatClock(value) {
@@ -296,6 +435,7 @@
 
     renderWorkers();
     renderChallenges();
+    renderSolvedDb();
     if ($("#worker-dialog").open) renderWorkerDialog();
     if ($("#worker-log-dialog").open) renderWorkerLogs(false);
   }
@@ -402,6 +542,121 @@
         <td>${escapeHtml(challenge.workerId || "—")}</td>
         <td><span class="status-tag ${escapeHtml(challenge.status)}">${escapeHtml(statusLabels[challenge.status] || challenge.status)}</span><span class="challenge-sub">${escapeHtml(challenge.phase)}</span></td>
       </tr>`).join("");
+  }
+
+  function renderSolvedDb() {
+    const records = state.solvedDb || [];
+    $("#empty-solved-db").classList.toggle("hidden", records.length > 0);
+    $("#solved-db-list").innerHTML = records.map((record) => {
+      const generating = record.writeupStatus === "generating";
+      const writeupLabel = record.hasWriteup ? "Write-up 재생성" : "Gen Write-up";
+      return `
+        <article class="solved-db-card">
+          <div class="solved-db-copy">
+            <div class="solved-db-title-row">
+              <span class="category-tag ${escapeHtml(record.category)}">${escapeHtml(record.category)}</span>
+              <strong>${escapeHtml(record.name)}</strong>
+              <span class="solved-db-verification ${escapeHtml(record.verification)}">${escapeHtml(record.verification)}</span>
+            </div>
+            <p>${escapeHtml(record.solverFile)} · ${escapeHtml(record.model)} · event.json · status.json</p>
+          </div>
+          <div class="solved-db-actions">
+            <button type="button" class="button writeup-button" data-writeup-id="${escapeHtml(record.id)}" ${generating ? "disabled" : ""}>${generating ? "생성 중…" : writeupLabel}</button>
+            <button type="button" class="button preview-button${record.hasWriteup ? "" : " disabled"}" data-preview-id="${escapeHtml(record.id)}" ${record.hasWriteup ? "" : "disabled"}>미리보기</button>
+            <a class="button download-button${record.hasWriteup ? "" : " disabled"}" ${record.hasWriteup ? `href="/api/solved/download?id=${encodeURIComponent(record.id)}&file=write-up.md"` : "aria-disabled=\"true\""}>다운로드</a>
+            <button type="button" class="button solved-delete-button" data-delete-solved-id="${escapeHtml(record.id)}" data-delete-solved-name="${escapeHtml(record.name)}" ${generating ? "disabled" : ""}>레코드 삭제</button>
+          </div>
+        </article>`;
+    }).join("");
+  }
+
+  async function generateWriteup(recordId, button) {
+    setBusy(button, true, "생성 중…");
+    try {
+      state = await api("/api/writeup", {
+        method: "POST",
+        body: { recordId },
+      });
+      render();
+      showToast("독립 Write-up 에이전트가 write-up.md를 생성했습니다.");
+    } catch (error) {
+      showToast(error.message, true);
+      await poll();
+    } finally {
+      setBusy(button, false);
+    }
+  }
+
+  function confirmAction(title, message, acceptLabel) {
+    const dialog = $("#confirm-dialog");
+    $("#confirm-dialog-title").textContent = title;
+    $("#confirm-dialog-message").textContent = message;
+    $("#confirm-dialog-accept").textContent = acceptLabel || "확인";
+    if (!dialog.open) dialog.showModal();
+    return new Promise((resolve) => { confirmResolver = resolve; });
+  }
+
+  function finishConfirm(accepted) {
+    const resolver = confirmResolver;
+    confirmResolver = null;
+    if ($("#confirm-dialog").open) $("#confirm-dialog").close();
+    if (resolver) resolver(accepted);
+  }
+
+  async function openWriteupPreview(recordId) {
+    const dialog = $("#writeup-preview-dialog");
+    $("#writeup-preview-title").textContent = "Write-up 미리보기";
+    $("#writeup-preview-content").textContent = "불러오는 중…";
+    if (!dialog.open) dialog.showModal();
+    try {
+      const preview = await api(`/api/solved/preview?id=${encodeURIComponent(recordId)}`);
+      const record = (state.solvedDb || []).find((item) => item.id === recordId);
+      $("#writeup-preview-title").textContent = record ? `${record.name} Write-up` : "Write-up 미리보기";
+      $("#writeup-preview-content").innerHTML = renderMarkdown(preview.content);
+    } catch (error) {
+      dialog.close();
+      showToast(error.message, true);
+    }
+  }
+
+  async function deleteSolvedRecord(recordId, name) {
+    const accepted = await confirmAction(
+      "Solved DB 레코드 삭제",
+      `'${name}'의 solver, event.json, status.json, write-up.md를 모두 삭제합니다. 이 작업은 되돌릴 수 없습니다.`,
+      "레코드 삭제"
+    );
+    if (!accepted) return;
+    try {
+      state = await api("/api/solved/delete", {
+        method: "POST",
+        body: { recordId },
+      });
+      if ($("#writeup-preview-dialog").open) $("#writeup-preview-dialog").close();
+      render();
+      showToast(`${name} Solved DB 레코드를 삭제했습니다.`);
+    } catch (error) {
+      showToast(error.message, true);
+    }
+  }
+
+  async function resetDashboard() {
+    const accepted = await confirmAction(
+      "Dashboard 전체 초기화",
+      "현재 실행을 중지하고 Solved DB의 모든 solver, JSON, Write-up 파일을 삭제합니다. 이 작업은 되돌릴 수 없습니다.",
+      "전체 초기화"
+    );
+    if (!accepted) return;
+    try {
+      state = await api("/api/reset", {
+        method: "POST",
+        body: { clearSolvedDb: true },
+      });
+      if ($("#writeup-preview-dialog").open) $("#writeup-preview-dialog").close();
+      render();
+      showToast("실행 상태와 Solved DB를 초기화했습니다.");
+    } catch (error) {
+      showToast(error.message, true);
+    }
   }
 
   function updateMode(mode) {
@@ -529,13 +784,38 @@
     if (!card || card.disabled) return;
     openWorkerDialog(Number(card.dataset.workerIndex));
   });
+  $("#solved-db-list").addEventListener("click", (event) => {
+    const deleteButton = event.target.closest("[data-delete-solved-id]");
+    if (deleteButton && !deleteButton.disabled) {
+      deleteSolvedRecord(deleteButton.dataset.deleteSolvedId, deleteButton.dataset.deleteSolvedName);
+      return;
+    }
+    const preview = event.target.closest("[data-preview-id]");
+    if (preview && !preview.disabled) {
+      openWriteupPreview(preview.dataset.previewId);
+      return;
+    }
+    const button = event.target.closest("[data-writeup-id]");
+    if (!button || button.disabled) return;
+    generateWriteup(button.dataset.writeupId, button);
+  });
   $("#worker-dialog-close").addEventListener("click", () => $("#worker-dialog").close());
   $("#worker-log-button").addEventListener("click", () => {
     renderWorkerLogs(true);
     if (!$("#worker-log-dialog").open) $("#worker-log-dialog").showModal();
   });
   $("#worker-log-close").addEventListener("click", () => $("#worker-log-dialog").close());
-  [$("#worker-dialog"), $("#worker-log-dialog")].forEach((dialog) => {
+  $("#writeup-preview-close").addEventListener("click", () => $("#writeup-preview-dialog").close());
+  $("#confirm-dialog-cancel").addEventListener("click", () => finishConfirm(false));
+  $("#confirm-dialog-accept").addEventListener("click", () => finishConfirm(true));
+  $("#confirm-dialog").addEventListener("cancel", (event) => {
+    event.preventDefault();
+    finishConfirm(false);
+  });
+  $("#confirm-dialog").addEventListener("click", (event) => {
+    if (event.target === $("#confirm-dialog")) finishConfirm(false);
+  });
+  [$("#worker-dialog"), $("#worker-log-dialog"), $("#writeup-preview-dialog")].forEach((dialog) => {
     dialog.addEventListener("click", (event) => {
       if (event.target === dialog) dialog.close();
     });
@@ -548,7 +828,7 @@
   $("#connect-button").addEventListener("click", connect);
   $("#run-button").addEventListener("click", startRun);
   $("#stop-button").addEventListener("click", () => simpleAction("/api/stop", "실행을 중지했습니다."));
-  $("#reset-button").addEventListener("click", () => simpleAction("/api/reset", "초기 상태로 되돌렸습니다."));
+  $("#reset-button").addEventListener("click", resetDashboard);
   $("#export-button").addEventListener("click", exportState);
 
   updateMode("demo");

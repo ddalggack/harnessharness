@@ -13,13 +13,14 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 from ctf_harness.app import CodexHarness, build_codex_harness
 from ctf_harness.domain import Challenge
-from ctf_harness.events import EventBus
+from ctf_harness.events import EventBus, ProgressReporter
 from ctf_harness.main_agent import MainAgentRuntime
 from ctf_harness.platforms import CTFdPlatformAdapter, MemoryPlatformAdapter, PlatformAdapter
 from ctf_harness.scheduler import LocalWorkerScheduler
 from ctf_harness.storage import LocalObjectStore, MemoryRunRepository
 from ctf_harness.worker import DemoWorkerRunner
 from ctf_harness.workflows import CtfRunWorkflow
+from ctf_harness.writeups import CodexWriteupGenerator, SolvedDatabase
 
 _CONSOLE_ROOT = Path(__file__).with_name("console")
 _DEFAULT_WORKER_MODEL = "gpt-5.4"
@@ -68,8 +69,10 @@ class CategoryFilteredPlatform:
 
 
 class DashboardController:
-    def __init__(self, runs_root: Path) -> None:
+    def __init__(self, runs_root: Path, writeup_generator: Any | None = None) -> None:
         self.runs_root = runs_root.resolve()
+        self.solved_db = SolvedDatabase(self.runs_root.parent / "solved-db")
+        self.writeup_generator = writeup_generator or CodexWriteupGenerator()
         self.loop = asyncio.new_event_loop()
         self.thread = threading.Thread(target=self.loop.run_forever, name="ddalggack-dashboard", daemon=True)
         self.thread.start()
@@ -84,6 +87,10 @@ class DashboardController:
         self.run_id: str | None = None
         self.run_future: Future[Any] | None = None
         self.last_error: str | None = None
+        self.generating_writeups: set[str] = set()
+        self.writeup_lock = threading.Lock()
+        self.archived_worker_ids: set[str] = set()
+        self.archive_lock = threading.Lock()
 
     def _submit(self, coroutine: Any) -> Any:
         return asyncio.run_coroutine_threadsafe(coroutine, self.loop).result(timeout=35)
@@ -101,16 +108,23 @@ class DashboardController:
                 pass
         return self.public_state()
 
-    def reset(self) -> dict[str, Any]:
-        self.stop()
-        self.platform = None
-        self.harness = None
-        self.challenges = []
-        self.connection_label = ""
-        self.auto_submit_flags = False
-        self.run_id = None
-        self.run_future = None
-        self.last_error = None
+    def reset(self, clear_solved_db: bool = True) -> dict[str, Any]:
+        with self.writeup_lock:
+            if clear_solved_db and self.generating_writeups:
+                raise RuntimeError("Write-up 생성 중에는 Solved DB를 초기화할 수 없습니다.")
+            self.stop()
+            self.platform = None
+            self.harness = None
+            self.challenges = []
+            self.connection_label = ""
+            self.auto_submit_flags = False
+            self.run_id = None
+            self.run_future = None
+            self.last_error = None
+            if clear_solved_db:
+                with self.archive_lock:
+                    self.solved_db.clear()
+                    self.archived_worker_ids.clear()
         return self.public_state()
 
     def connect(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -198,9 +212,98 @@ class DashboardController:
         self.harness = self._build_harness()
         self.run_id = datetime.now(timezone.utc).strftime("dashboard-%Y%m%d-%H%M%S")
         self.last_error = None
-        self.run_future = asyncio.run_coroutine_threadsafe(
-            self.harness.workflow.run(self.run_id), self.loop
+        self.archived_worker_ids.clear()
+        self.run_future = asyncio.run_coroutine_threadsafe(self._run_dashboard(), self.loop)
+        return self.public_state()
+
+    async def _run_dashboard(self) -> Any:
+        assert self.harness is not None
+        assert self.run_id is not None
+        reporter = ProgressReporter(
+            self.harness.events,
+            self.runs_root,
+            self.run_id,
+            console_mode="quiet",
         )
+        await reporter.start()
+        try:
+            return await self.harness.workflow.run(self.run_id)
+        finally:
+            await reporter.stop()
+            await asyncio.to_thread(self._archive_completed_workers)
+
+    def _archive_completed_workers(self) -> None:
+        if self.mode != "ctfd" or self.harness is None or self.run_id is None:
+            return
+        with self.archive_lock:
+            records = [
+                record
+                for record in self.harness.repository.workers.values()
+                if record.status.value == "completed"
+                and record.worker_id not in self.archived_worker_ids
+            ]
+            if not records:
+                return
+            events = list(self.harness.events.history)
+            for record in records:
+                archived = self.solved_db.archive_run(
+                    self.run_id,
+                    list(self.challenges),
+                    [record],
+                    events,
+                    self.runs_root,
+                )
+                if archived:
+                    self.archived_worker_ids.add(record.worker_id)
+
+    def generate_writeup(self, record_id: str) -> dict[str, Any]:
+        entry = self.solved_db.entry(record_id)
+        status = json.loads((entry / "status.json").read_text(encoding="utf-8"))
+        model = str(status.get("model") or self.worker_model)
+        with self.writeup_lock:
+            if record_id in self.generating_writeups:
+                raise RuntimeError("이미 Write-up을 생성하고 있습니다.")
+            self.generating_writeups.add(record_id)
+        future: Future[Any] | None = None
+        try:
+            self.solved_db.mark_writeup(record_id, "generating")
+            future = asyncio.run_coroutine_threadsafe(
+                self.writeup_generator.generate(entry, model), self.loop
+            )
+            future.result(timeout=300)
+            self.solved_db.mark_writeup(record_id, "completed")
+        except Exception as exc:
+            if future is not None and not future.done():
+                future.cancel()
+            message = f"{type(exc).__name__}: {exc}"
+            self.solved_db.mark_writeup(record_id, "failed", message)
+            raise RuntimeError(message) from exc
+        finally:
+            with self.writeup_lock:
+                self.generating_writeups.discard(record_id)
+        return self.public_state()
+
+    def solved_file(self, record_id: str, name: str) -> Path:
+        if name not in {"write-up.md", "event.json", "status.json"}:
+            raise ValueError("다운로드할 수 없는 solved-db 파일입니다.")
+        target = self.solved_db.entry(record_id) / name
+        if not target.is_file():
+            raise FileNotFoundError("요청한 solved-db 파일이 아직 없습니다.")
+        return target
+
+    def writeup_preview(self, record_id: str) -> dict[str, str]:
+        target = self.solved_file(record_id, "write-up.md")
+        return {
+            "recordId": record_id,
+            "content": target.read_text(encoding="utf-8"),
+        }
+
+    def delete_solved_record(self, record_id: str) -> dict[str, Any]:
+        with self.writeup_lock:
+            if record_id in self.generating_writeups:
+                raise RuntimeError("Write-up 생성 중인 레코드는 삭제할 수 없습니다.")
+            with self.archive_lock:
+                self.solved_db.delete(record_id)
         return self.public_state()
 
     @staticmethod
@@ -427,6 +530,7 @@ class DashboardController:
         }
 
     def public_state(self) -> dict[str, Any]:
+        self._archive_completed_workers()
         running = self.run_future is not None and not self.run_future.done()
         status = "running" if running else "idle"
         message = "왼쪽에서 Demo 또는 CTFd 환경을 먼저 확인합니다."
@@ -475,6 +579,7 @@ class DashboardController:
             },
             "workers": worker_rows,
             "challenges": challenge_rows,
+            "solvedDb": self.solved_db.list_records(),
         }
 
     def shutdown(self) -> None:
@@ -525,6 +630,33 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
             else:
                 self._json(HTTPStatus.OK, value)
             return
+        if path == "/api/solved/download":
+            query = parse_qs(parsed.query)
+            try:
+                target = self.controller.solved_file(
+                    query.get("id", [""])[0], query.get("file", ["write-up.md"])[0]
+                )
+                body = target.read_bytes()
+            except (ValueError, FileNotFoundError, OSError) as exc:
+                self._json(HTTPStatus.NOT_FOUND, {"error": str(exc)})
+                return
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", _CONTENT_TYPES.get(target.suffix, "application/octet-stream"))
+            self.send_header("Content-Disposition", f'attachment; filename="{target.name}"')
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        if path == "/api/solved/preview":
+            try:
+                record_id = parse_qs(parsed.query).get("id", [""])[0]
+                value = self.controller.writeup_preview(record_id)
+            except (ValueError, FileNotFoundError, OSError) as exc:
+                self._json(HTTPStatus.NOT_FOUND, {"error": str(exc)})
+            else:
+                self._json(HTTPStatus.OK, value)
+            return
         relative = "index.html" if path == "/" else unquote(path.lstrip("/"))
         target = (_CONSOLE_ROOT / relative).resolve()
         if _CONSOLE_ROOT.resolve() not in target.parents:
@@ -538,7 +670,7 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
         self.send_response(HTTPStatus.OK)
         self.send_header("Content-Type", _CONTENT_TYPES.get(target.suffix, "application/octet-stream"))
         self.send_header("Content-Length", str(len(body)))
-        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Cache-Control", "no-store")
         self.end_headers()
         self.wfile.write(body)
 
@@ -555,13 +687,22 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
                 value = self.controller.stop()
                 status = HTTPStatus.OK
             elif path == "/api/reset":
-                value = self.controller.reset()
+                payload = self._body()
+                value = self.controller.reset(bool(payload.get("clearSolvedDb", True)))
+                status = HTTPStatus.OK
+            elif path == "/api/writeup":
+                value = self.controller.generate_writeup(str(self._body().get("recordId", "")))
+                status = HTTPStatus.OK
+            elif path == "/api/solved/delete":
+                value = self.controller.delete_solved_record(
+                    str(self._body().get("recordId", ""))
+                )
                 status = HTTPStatus.OK
             else:
                 self._json(HTTPStatus.NOT_FOUND, {"error": "API 경로를 찾을 수 없습니다."})
                 return
             self._json(status, value)
-        except (ValueError, RuntimeError, json.JSONDecodeError) as exc:
+        except (ValueError, RuntimeError, FileNotFoundError, json.JSONDecodeError) as exc:
             self._json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
         except Exception as exc:
             self._json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": f"{type(exc).__name__}: {exc}"})

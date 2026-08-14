@@ -6,7 +6,7 @@
     <meta name="color-scheme" content="light" />
     <title>HarneHarness</title>
     <meta name="description" content="Python Worker를 제어하는 버튼식 로컬 CTF 하네스" />
-    <link rel="stylesheet" href="/styles.css" />
+    <link rel="stylesheet" href="/styles.css?v=20260814-3" />
   </head>
   <body>
     <div class="app-shell">
@@ -168,6 +168,18 @@
             </article>
           </section>
 
+          <section class="surface solved-db-surface" aria-labelledby="solved-db-title">
+            <div class="surface-heading">
+              <div><span class="step-number">05</span><h2 id="solved-db-title">Solved DB</h2></div>
+              <span class="mono-label">SOLVER · EVENT.JSON · STATUS.JSON · WRITE-UP.MD</span>
+            </div>
+            <div id="solved-db-list" class="solved-db-list"></div>
+            <div id="empty-solved-db" class="solved-db-empty">
+              <strong>아직 보관된 풀이가 없습니다</strong>
+              <p>CTF 문제 풀이가 완료되면 재현 solver와 실행 근거가 자동 저장됩니다.</p>
+            </div>
+          </section>
+
         </main>
       </div>
     </div>
@@ -228,7 +240,32 @@
       </div>
     </dialog>
 
+    <dialog id="writeup-preview-dialog" class="writeup-preview-dialog" aria-labelledby="writeup-preview-title">
+      <div class="writeup-preview-shell">
+        <header class="writeup-preview-head">
+          <div>
+            <span>GENERATED WRITE-UP</span>
+            <h2 id="writeup-preview-title">Write-up 미리보기</h2>
+          </div>
+          <button id="writeup-preview-close" type="button" aria-label="Write-up 미리보기 닫기">×</button>
+        </header>
+        <article id="writeup-preview-content" class="writeup-preview-content">불러오는 중…</article>
+      </div>
+    </dialog>
+
+    <dialog id="confirm-dialog" class="confirm-dialog" aria-labelledby="confirm-dialog-title">
+      <div class="confirm-dialog-shell">
+        <span class="confirm-dialog-kicker">CONFIRM ACTION</span>
+        <h2 id="confirm-dialog-title">삭제 확인</h2>
+        <p id="confirm-dialog-message"></p>
+        <div class="confirm-dialog-actions">
+          <button id="confirm-dialog-cancel" type="button" class="button">취소</button>
+          <button id="confirm-dialog-accept" type="button" class="button danger-confirm">삭제</button>
+        </div>
+      </div>
+    </dialog>
+
     <div id="toast" class="toast" role="status" aria-live="polite"></div>
-    <script src="/app.js" defer></script>
+    <script src="/app.js?v=20260814-3" defer></script>
   </body>
 </html>
