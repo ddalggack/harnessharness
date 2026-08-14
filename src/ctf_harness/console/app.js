@@ -6,6 +6,7 @@
   let state = null;
   let selectedMode = "demo";
   let workerLimit = 3;
+  let workerModel = "gpt-5.4";
   let autoSubmitFlags = false;
   let challengeFilter = "all";
   let polling = false;
@@ -282,6 +283,7 @@
     $("#run-button").disabled = !connected || running;
     $("#stop-button").disabled = !running;
     $("#connect-button").disabled = running;
+    $("#worker-model").disabled = running;
     const connectLabel = $("#connect-button").querySelector("span");
     if (connectLabel) connectLabel.textContent = connected ? "문제 다시 불러오기" : "문제 불러오기";
     $("#auto-submit-flags").checked = autoSubmitFlags;
@@ -305,6 +307,7 @@
       worker.status,
       worker.challengeName,
       worker.profile,
+      worker.model,
       worker.phase,
       worker.progress,
       worker.completed,
@@ -416,6 +419,7 @@
     const payload = {
       mode: selectedMode,
       workerLimit,
+      workerModel,
       categories,
       baseUrl: $("#base-url").value.trim(),
       apiToken: $("#api-token").value,
@@ -425,6 +429,8 @@
     setBusy($("#connect-button"), true, "확인 중…");
     try {
       state = await api("/api/connect", { method: "POST", body: payload });
+      workerModel = state.config.workerModel;
+      $("#worker-model").value = workerModel;
       autoSubmitFlags = Boolean(state.config.autoSubmitFlags);
       $("#api-token").value = "";
       render();
@@ -441,7 +447,10 @@
     try {
       state = await api("/api/run", {
         method: "POST",
-        body: { autoSubmitFlags: selectedMode === "ctfd" && autoSubmitFlags },
+        body: {
+          workerModel,
+          autoSubmitFlags: selectedMode === "ctfd" && autoSubmitFlags,
+        },
       });
       render();
       showToast("Ddalggack Worker 실행을 시작했습니다.");
@@ -511,6 +520,9 @@
   }));
   $("#auto-submit-flags").addEventListener("change", (event) => {
     autoSubmitFlags = selectedMode === "ctfd" && event.target.checked;
+  });
+  $("#worker-model").addEventListener("input", (event) => {
+    workerModel = event.target.value.trim();
   });
   $("#worker-list").addEventListener("click", (event) => {
     const card = event.target.closest("[data-worker-index]");

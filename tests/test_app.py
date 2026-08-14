@@ -48,6 +48,34 @@ class HarnessWiringTests(unittest.TestCase):
         self.assertLess(html.index('id="auto-submit-flags"'), html.index('id="connect-button"'))
         self.assertIn("autoSubmitFlags", javascript)
 
+    def test_dashboard_selects_worker_model_for_runs(self):
+        from ctf_harness.dashboard import DashboardController
+
+        root = Path(__file__).resolve().parents[1]
+        html = (root / "src/ctf_harness/console/index.html").read_text(encoding="utf-8")
+        javascript = (root / "src/ctf_harness/console/app.js").read_text(encoding="utf-8")
+
+        self.assertIn('id="worker-model"', html)
+        self.assertIn('value="gpt-5.4-mini"', html)
+        self.assertIn("workerModel", javascript)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            controller = DashboardController(Path(tmp))
+            try:
+                state = controller.connect({
+                    "mode": "demo",
+                    "categories": ["web"],
+                    "workerLimit": 1,
+                    "workerModel": "gpt-5.4-mini",
+                })
+                self.assertEqual(state["config"]["workerModel"], "gpt-5.4-mini")
+
+                controller.start({"workerModel": "gpt-5.5"})
+                self.assertEqual(controller.harness.workflow.worker_model, "gpt-5.5")
+                controller.run_future.result(timeout=5)
+            finally:
+                controller.shutdown()
+
     def test_dashboard_omits_execution_log_panel_and_event_payload(self):
         from ctf_harness.dashboard import DashboardController
 

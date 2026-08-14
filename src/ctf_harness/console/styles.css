@@ -108,6 +108,8 @@ button { color: inherit; }
 .field input { width: 100%; min-height: 38px; padding: 0 16px 0 12px; border: 1px solid var(--line); border-radius: 4px; color: var(--ink); background: transparent; outline: none; }
 .field input:focus { border-color: var(--accent); box-shadow: none; }
 .field small, .switch-row small { color: var(--muted); font-size: 10px; line-height: 1.45; }
+.model-field { margin-bottom: 18px; }
+.model-field input:disabled { color: var(--muted); background: var(--surface-muted); cursor: not-allowed; }
 .fieldset { border: 0; padding: 0; margin: 0 0 18px; }
 .fieldset legend { margin-bottom: 9px; }
 .check-row { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }

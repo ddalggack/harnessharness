@@ -22,6 +22,7 @@ from ctf_harness.worker import DemoWorkerRunner
 from ctf_harness.workflows import CtfRunWorkflow
 
 _CONSOLE_ROOT = Path(__file__).with_name("console")
+_DEFAULT_WORKER_MODEL = "gpt-5.4"
 _CONTENT_TYPES = {
     ".html": "text/html; charset=utf-8",
     ".css": "text/css; charset=utf-8",
@@ -78,6 +79,7 @@ class DashboardController:
         self.mode = "demo"
         self.connection_label = ""
         self.worker_limit = 3
+        self.worker_model = _DEFAULT_WORKER_MODEL
         self.auto_submit_flags = False
         self.run_id: str | None = None
         self.run_future: Future[Any] | None = None
@@ -121,6 +123,9 @@ class DashboardController:
         worker_limit = int(payload.get("workerLimit", 3))
         if not 1 <= worker_limit <= 3:
             raise ValueError("동시 Worker 수는 1~3이어야 합니다.")
+        worker_model = str(payload.get("workerModel", _DEFAULT_WORKER_MODEL)).strip()
+        if not worker_model or len(worker_model) > 100:
+            raise ValueError("사용할 모델 ID를 올바르게 입력해야 합니다.")
         auto_submit_flags = bool(payload.get("autoSubmitFlags", False))
 
         if mode == "demo":
@@ -147,6 +152,7 @@ class DashboardController:
         self.challenges = challenges
         self.connection_label = label
         self.worker_limit = worker_limit
+        self.worker_model = worker_model
         self.auto_submit_flags = auto_submit_flags
         self.harness = None
         self.run_id = None
@@ -160,6 +166,7 @@ class DashboardController:
             return build_codex_harness(
                 platform=self.platform,
                 runs_root=self.runs_root,
+                worker_model=self.worker_model,
                 max_swarms=self.worker_limit,
                 submit_flags=self.auto_submit_flags,
             )
@@ -172,6 +179,7 @@ class DashboardController:
             LocalObjectStore(self.runs_root),
             events,
             main=MainAgentRuntime(repository, events),
+            worker_model=self.worker_model,
         )
         return CodexHarness(workflow, scheduler, repository, events)
 
@@ -180,7 +188,12 @@ class DashboardController:
             raise RuntimeError("먼저 환경을 확인해야 합니다.")
         if self.run_future is not None and not self.run_future.done():
             raise RuntimeError("이미 실행 중입니다.")
-        requested_auto_submit = bool((payload or {}).get("autoSubmitFlags", False))
+        request = payload or {}
+        worker_model = str(request.get("workerModel", self.worker_model)).strip()
+        if not worker_model or len(worker_model) > 100:
+            raise ValueError("사용할 모델 ID를 올바르게 입력해야 합니다.")
+        self.worker_model = worker_model
+        requested_auto_submit = bool(request.get("autoSubmitFlags", False))
         self.auto_submit_flags = self.mode == "ctfd" and requested_auto_submit
         self.harness = self._build_harness()
         self.run_id = datetime.now(timezone.utc).strftime("dashboard-%Y%m%d-%H%M%S")
@@ -448,6 +461,7 @@ class DashboardController:
             "connection": {"connected": self.platform is not None, "label": self.connection_label},
             "config": {
                 "workerLimit": self.worker_limit,
+                "workerModel": self.worker_model,
                 "mode": self.mode,
                 "autoSubmitFlags": self.auto_submit_flags,
             },
