@@ -9,13 +9,16 @@ from typing import Any
 
 from ctf_harness.protocol import ReportKind, WorkerAssignment, WorkerReport
 from ctf_harness.worker.runner import ReportCallback, ReportDecision
+from ctf_harness.writeups import find_solver
 
 WORKER_INSTRUCTIONS = """You are an autonomous CTF worker assigned exactly one challenge.
 Work only inside the assigned workspace. Perform the analysis and verification yourself.
 Report meaningful checkpoints, completion, or terminal failures, not individual tool calls.
 A failed report includes any condition you cannot resolve autonomously. Report a discovered
 flag as flag_candidate so the coordinator can validate it. Use completed only when no flag
-is required. A completed report must describe real reproduced evidence. Return only JSON
+is required. Before reporting a flag candidate or completion, create a non-empty reusable
+solver program in the workspace, preferably solver.py, that reproduces the solution from
+a clean run, and include it in artifacts. A completed report must describe real reproduced evidence. Return only JSON
 matching the supplied output schema."""
 
 REPORT_SCHEMA = {
@@ -133,6 +136,7 @@ class CodexWorkerRunner:
         max_turns: int = 8,
         activity: Callable[..., Awaitable[None]] | None = None,
         heartbeat_interval_s: float = 15.0,
+        require_solver_artifact: bool = True,
     ) -> None:
         if max_turns < 1:
             raise ValueError("max_turns must be positive")
@@ -142,6 +146,7 @@ class CodexWorkerRunner:
             raise ValueError("heartbeat_interval_s must be positive")
         self._activity = activity
         self.heartbeat_interval_s = heartbeat_interval_s
+        self.require_solver_artifact = require_solver_artifact
 
     async def _emit(self, assignment: WorkerAssignment, event_type: str, **payload: object) -> None:
         if self._activity is not None:
@@ -281,6 +286,30 @@ class CodexWorkerRunner:
                 for turn_number in range(1, self.max_turns + 1):
                     response = await self._run_turn(thread, prompt, assignment, turn_number)
                     worker_report = _report_from_response(assignment, response)
+                    if (
+                        self.require_solver_artifact
+                        and worker_report.kind in {ReportKind.FLAG_CANDIDATE, ReportKind.COMPLETED}
+                    ):
+                        solver = find_solver(workspace, worker_report.artifacts)
+                        if solver is None:
+                            prompt = (
+                                "Before you can finish, create a non-empty reusable solver.py (or "
+                                "an equivalent solve/exploit source file) in the workspace. It must "
+                                "reproduce the solution from a clean run. Then report again and include "
+                                "the file path in artifacts."
+                            )
+                            continue
+                        relative_solver = str(solver.relative_to(workspace))
+                        if relative_solver not in worker_report.artifacts:
+                            worker_report = WorkerReport(
+                                worker_report.run_id,
+                                worker_report.worker_id,
+                                worker_report.challenge_id,
+                                worker_report.kind,
+                                worker_report.summary,
+                                (*worker_report.artifacts, relative_solver),
+                                worker_report.flag_candidate,
+                            )
                     if (
                         worker_report.kind is ReportKind.COMPLETED
                         and worker_report.flag_candidate

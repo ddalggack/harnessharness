@@ -76,6 +76,101 @@ class HarnessWiringTests(unittest.TestCase):
             finally:
                 controller.shutdown()
 
+    def test_dashboard_persists_run_progress_and_exposes_solved_db_ui(self):
+        from ctf_harness.dashboard import DashboardController
+
+        root = Path(__file__).resolve().parents[1]
+        html = (root / "src/ctf_harness/console/index.html").read_text(encoding="utf-8")
+        javascript = (root / "src/ctf_harness/console/app.js").read_text(encoding="utf-8")
+        self.assertIn('id="solved-db-list"', html)
+        self.assertIn("Gen Write-up", javascript)
+        self.assertIn("/api/writeup", javascript)
+        self.assertIn("/api/solved/download", javascript)
+        self.assertIn("/api/solved/preview", javascript)
+        self.assertIn("/api/solved/delete", javascript)
+        self.assertIn('id="confirm-dialog"', html)
+        self.assertIn("confirmAction", javascript)
+        self.assertNotIn("await openWriteupPreview(recordId)", javascript)
+        self.assertIn("renderMarkdown", javascript)
+        self.assertIn("innerHTML = renderMarkdown(preview.content)", javascript)
+        self.assertIn('/app.js?v=', html)
+        self.assertIn('id="writeup-preview-dialog"', html)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            runs_root = Path(tmp) / "runs"
+            controller = DashboardController(runs_root)
+            try:
+                controller.connect({
+                    "mode": "demo",
+                    "categories": ["web"],
+                    "workerLimit": 1,
+                })
+                state = controller.start()
+                run_id = state["run"]["id"]
+                controller.run_future.result(timeout=5)
+                self.assertTrue((runs_root / run_id / "events.jsonl").is_file())
+                self.assertTrue((runs_root / run_id / "status.json").is_file())
+                self.assertIn("solvedDb", controller.public_state())
+            finally:
+                controller.shutdown()
+
+    def test_dashboard_archives_each_completed_worker_before_run_stops(self):
+        from ctf_harness.dashboard import DashboardController
+        from ctf_harness.domain import WorkerProfile, WorkerStatus
+        from ctf_harness.domain.models import WorkerRecord
+        from ctf_harness.protocol import ReportKind, WorkerReport
+
+        challenge = Challenge("one", "First Problem", "web", "first")
+        with tempfile.TemporaryDirectory() as tmp:
+            runs_root = Path(tmp) / "runs"
+            controller = DashboardController(runs_root)
+            try:
+                repository = MemoryRunRepository()
+                events = EventBus()
+                scheduler = LocalWorkerScheduler(DemoWorkerRunner, max_workers=1)
+                platform = MemoryPlatformAdapter([challenge])
+                workflow = CtfRunWorkflow(
+                    platform,
+                    scheduler,
+                    repository,
+                    LocalObjectStore(runs_root),
+                    events,
+                    main=MainAgentRuntime(repository, events),
+                )
+                report = WorkerReport(
+                    "live-run",
+                    "live-run-one",
+                    challenge.id,
+                    ReportKind.COMPLETED,
+                    "solved",
+                    ("solver.py",),
+                )
+                repository.workers[report.worker_id] = WorkerRecord(
+                    report.worker_id,
+                    challenge.id,
+                    WorkerProfile("web", "worker-web"),
+                    status=WorkerStatus.COMPLETED,
+                    reports=[report],
+                )
+                workspace = runs_root / "live-run" / "challenges" / challenge.id
+                workspace.mkdir(parents=True)
+                (workspace / "solver.py").write_text("print('solved')\n", encoding="utf-8")
+
+                controller.mode = "ctfd"
+                controller.platform = platform
+                controller.challenges = [challenge]
+                controller.run_id = "live-run"
+                controller.harness = CodexHarness(workflow, scheduler, repository, events)
+
+                state = controller.public_state()
+                self.assertEqual([item["id"] for item in state["solvedDb"]], ["web-one"])
+                entry = Path(tmp) / "solved-db" / "web-one"
+                (entry / "write-up.md").write_text("# keep me\n", encoding="utf-8")
+                controller.public_state()
+                self.assertTrue((entry / "write-up.md").is_file())
+            finally:
+                controller.shutdown()
+
     def test_dashboard_omits_execution_log_panel_and_event_payload(self):
         from ctf_harness.dashboard import DashboardController
 

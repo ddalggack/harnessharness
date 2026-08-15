@@ -2,6 +2,7 @@ import asyncio
 import json
 import tempfile
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 
 from ctf_harness.protocol import ReportKind, WorkerAssignment, WorkerReport
@@ -126,6 +127,42 @@ class CodexRuntimeTests(unittest.TestCase):
             set(REPORT_SCHEMA["required"]),
         )
 
+    def test_worker_must_leave_reusable_solver_before_completion(self):
+        async def scenario() -> None:
+            with tempfile.TemporaryDirectory() as tmp:
+                workspace = Path(tmp)
+
+                class SolverThread(FakeThread):
+                    async def run(self, prompt: str, **kwargs):
+                        self.prompts.append(prompt)
+                        if len(self.prompts) == 2:
+                            (workspace / "solver.py").write_text("print('FLAG{ok}')\n")
+                        return SimpleNamespace(final_response=json.dumps({
+                            "kind": "completed",
+                            "summary": "done",
+                            "artifacts": [],
+                            "flag_candidate": None,
+                        }))
+
+                thread = SolverThread([])
+                runner = CodexWorkerRunner(
+                    sdk_factory=lambda: FakeCodex(thread),
+                    max_turns=2,
+                )
+                seen = []
+
+                async def report(item):
+                    seen.append(item)
+                    return None
+
+                result = await runner.run(assignment(tmp), report)
+                self.assertEqual(len(thread.prompts), 2)
+                self.assertIn("solver.py", thread.prompts[1])
+                self.assertEqual(result.artifacts, ("solver.py",))
+                self.assertEqual(seen, [result])
+
+        asyncio.run(scenario())
+
     def test_worker_receives_challenge_data_and_plans_on_its_own_thread(self):
         async def scenario() -> None:
             thread = FakeThread(
@@ -145,7 +182,11 @@ class CodexRuntimeTests(unittest.TestCase):
                 ]
             )
             client = FakeCodex(thread)
-            runner = CodexWorkerRunner(sdk_factory=lambda: client, max_turns=3)
+            runner = CodexWorkerRunner(
+                sdk_factory=lambda: client,
+                max_turns=3,
+                require_solver_artifact=False,
+            )
             seen: list[WorkerReport] = []
 
             async def report(item: WorkerReport):
@@ -183,7 +224,11 @@ class CodexRuntimeTests(unittest.TestCase):
                     {"kind": "flag_candidate", "summary": "second", "artifacts": [], "flag_candidate": "FLAG{ok}"},
                 ]
             )
-            runner = CodexWorkerRunner(sdk_factory=lambda: FakeCodex(thread), max_turns=3)
+            runner = CodexWorkerRunner(
+                sdk_factory=lambda: FakeCodex(thread),
+                max_turns=3,
+                require_solver_artifact=False,
+            )
             seen = []
 
             async def report(item):
@@ -238,6 +283,7 @@ class CodexRuntimeTests(unittest.TestCase):
                 sdk_factory=lambda: FakeCodex(thread),
                 heartbeat_interval_s=0.01,
                 activity=emit,
+                require_solver_artifact=False,
             )
             with tempfile.TemporaryDirectory() as tmp:
                 result = await runner.run(assignment(tmp), lambda item: asyncio.sleep(0))

@@ -287,7 +287,7 @@ Demo는 `DemoWorkerRunner`를 사용하며 Codex나 외부 CTFd를 호출하지 
 
 1. `로컬 CTFd` 선택
 2. CTFd URL과 Access Token 입력
-3. 문제 분야와 동시 Worker 수 선택
+3. 문제 분야, 동시 Worker 수, Worker 모델 선택
 4. 허가된 대상 확인 체크
 5. 필요하면 `플래그 자동 제출` 활성화
 6. `문제 불러오기` 클릭
@@ -296,7 +296,7 @@ Demo는 `DemoWorkerRunner`를 사용하며 Codex나 외부 CTFd를 호출하지 
 
 Dashboard API는 localhost 및 사설망 CTFd 주소만 허용한다. CTFd 연결과 Worker 실행은 별도 단계이므로 `문제 불러오기`만 눌러서는 Worker가 시작되지 않는다.
 
-현재 Dashboard CLI에는 모델 변경 옵션이 없으며 CTFd Worker는 코드의 기본 모델 `gpt-5.4`를 사용한다.
+Dashboard의 Worker 모델 필드에서 추천 모델을 선택하거나 Codex 모델 ID를 직접 입력할 수 있다. 기본값은 `gpt-5.4`다.
 
 ## 8. 실행 산출물
 
@@ -314,6 +314,19 @@ runs/<run-id>/
 - `status.json`: 가장 최근 Worker 상태 snapshot
 - `challenge.json`: CTFd에서 받은 제목, 카테고리, 설명, host, port
 - 최종 CLI stdout: Worker 상태와 전체 structured report JSON
+
+Dashboard에서 실제 CTF 풀이가 완료되면 다음 solved DB 레코드도 생성된다.
+
+```text
+solved-db/<category>-<challenge-id>/
+├── solver.py 또는 exploit.py 등의 재현 코드
+├── event.json
+├── status.json
+└── write-up.md  # Gen Write-up 실행 후 생성
+```
+
+Dashboard 하단의 `Gen Write-up`은 풀이 Worker와 별도의 Codex thread가 위 파일만 읽어 한국어 write-up을 생성한다. 완료된 `write-up.md`는 Dashboard에서 다운로드할 수 있다.
+각 Solved DB 레코드는 확인 후 개별 삭제할 수 있으며, Dashboard `초기화`는 확인 후 전체 Solved DB도 함께 삭제한다.
 
 Flag 후보와 명령 출력이 이벤트에 포함될 수 있으므로 `runs/` 접근 권한을 제한한다. `runs/*`는 Git ignore 대상이다.
 
